@@ -19,4 +19,18 @@
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
+  <ItemGroup>
+    <None Include=".gitignore" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="core_types.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="hp_error.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="hp_math.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
 </Project>
