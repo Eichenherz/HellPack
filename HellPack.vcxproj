@@ -71,10 +71,12 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>D:\EichenRepos\HellPack\3rdParty\meshoptimizer\src;D:\EichenRepos\HellPack\3rdParty;$(IncludePath)</IncludePath>
+    <IncludePath>D:\EichenRepos\HellPack\3rdParty\MikkTSpace;D:\EichenRepos\HellPack\3rdParty\meshoptimizer\src;D:\EichenRepos\HellPack\3rdParty;$(IncludePath)</IncludePath>
+    <SourcePath>$(SourcePath)</SourcePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>D:\EichenRepos\HellPack\3rdParty\meshoptimizer\src;D:\EichenRepos\HellPack\3rdParty;$(IncludePath)</IncludePath>
+    <IncludePath>D:\EichenRepos\HellPack\3rdParty\MikkTSpace;D:\EichenRepos\HellPack\3rdParty\meshoptimizer\src;D:\EichenRepos\HellPack\3rdParty;$(IncludePath)</IncludePath>
+    <SourcePath>$(SourcePath)</SourcePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -133,13 +135,30 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="3rdParty\meshoptimizer\src\allocator.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\clusterizer.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\indexanalyzer.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\indexcodec.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\indexgenerator.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\meshletcodec.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\overdrawoptimizer.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\partition.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\quantization.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\rasterizer.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\simplifier.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\spatialorder.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\stripifier.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\vcacheoptimizer.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\vertexcodec.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\vertexfilter.cpp" />
+    <ClCompile Include="3rdParty\meshoptimizer\src\vfetchoptimizer.cpp" />
+    <ClCompile Include="3rdParty\MikkTSpace\mikktspace.c" />
     <ClCompile Include="HellPack.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include=".gitignore" />
-  </ItemGroup>
-  <ItemGroup>
+    <ClInclude Include="3rdParty\meshoptimizer\src\meshoptimizer.h" />
     <ClInclude Include="core_types.h" />
+    <ClInclude Include="hp_encoding.h" />
     <ClInclude Include="hp_error.h" />
     <ClInclude Include="hp_math.h" />
   </ItemGroup>

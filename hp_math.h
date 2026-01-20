@@ -23,6 +23,11 @@ using float4 = DirectX::XMFLOAT4;
 using float3 = DirectX::XMFLOAT3;
 using float2 = DirectX::XMFLOAT2;
 
+struct u16x3
+{
+	u16 x, y, z;
+};
+
 #include <immintrin.h>
 
 // NOTE: from https://stackoverflow.com/questions/17638487/minimum-of-4-sp-values-in-m128

@@ -4,12 +4,14 @@
 #define TINYGLTF_NOEXCEPTION
 #include <tinygltf/tiny_gltf.h>
 #include <meshoptimizer.h>
+#include <mikktspace.h>
 
 #include <iostream>
 #include <filesystem>
 namespace fs = std::filesystem;
 
 #include <span>
+#include <ranges>
 
 #include "core_types.h"
 #include "hp_error.h"
@@ -52,28 +54,6 @@ struct gltf_node
 	i32 meshIdx;
 };
 
-enum class index_type : u8
-{
-	U8,
-	U16,
-	U32
-};
-
-struct gltf_index_span
-{
-	index_type type;
-	union
-	{
-		std::span<const u8>  u8Data;
-		std::span<const u16> u16Data;
-		std::span<const u32> u32Data;
-	};
-
-	gltf_index_span( std::span<const u8> span ) : type{ index_type::U8 }, u8Data{ span } {}
-	gltf_index_span( std::span<const u16> span ) : type{ index_type::U16 }, u16Data{ span } {}
-	gltf_index_span( std::span<const u32> span ) : type{ index_type::U32 }, u32Data{ span } {}
-};
-
 constexpr bool LEFT_HANDED = true;
 static_assert( LEFT_HANDED );
 
@@ -82,34 +62,19 @@ struct raw_mesh
 	std::string name;
 	std::vector<float3> pos;
 	std::vector<float3> normals;
-	std::vector<float3> tans;
+	std::vector<float4> tans;
 	std::vector<float2> uvs;
 	std::vector<u32> indices;
 	i32 materialIdx;
 };
 
-struct gltf_attr_stream
+struct gltf_raw_attr_stream
 {
 	const u8* data;
 	u64 elemCount;
 	u64 componentCount;
 	u64 componentByteSize;
 	u64 strideBytes; 
-
-	explicit operator gltf_index_span() const
-	{
-		HP_ASSERT( componentCount == 1 ); // NOTE: indices are scalar
-		HP_ASSERT( strideBytes == componentByteSize ); // NOTE: must be packed for span
-
-		switch( componentByteSize )
-		{
-			case sizeof( u8 ) : return { std::span<const u8>{ data, elemCount } };
-			case sizeof( u16 ) : return { std::span<const u16>{ ( const u16* ) data, elemCount } };
-			case sizeof( u32 ) : return { std::span<const u32>{ ( const u32* ) data, elemCount } };
-
-			default: HP_ASSERT( false );
-		}
-	}
 
 	constexpr u64 size() const noexcept
 	{
@@ -118,10 +83,8 @@ struct gltf_attr_stream
 };
 
 template<typename T>
-struct gltf_typed_stream_view
+struct gltf_typed_attr_stream : gltf_raw_attr_stream
 {
-	const gltf_attr_stream& stream;
-
 	struct iterator
 	{
 		using iterator_category = std::input_iterator_tag;
@@ -159,102 +122,20 @@ struct gltf_typed_stream_view
 
 	iterator begin() const
 	{
-		if( 0 == stream.elemCount ) return { nullptr, stream.strideBytes };
+		if( 0 == elemCount ) return { nullptr, strideBytes };
 
-		HP_ASSERT( sizeof( T ) == ( stream.componentCount * stream.componentByteSize ) );
-		HP_ASSERT( stream.strideBytes >= sizeof( T ) );
-		return { stream.data, stream.strideBytes };
+		HP_ASSERT( sizeof( T ) == ( componentCount * componentByteSize ) );
+		HP_ASSERT( strideBytes >= sizeof( T ) );
+		return { data, strideBytes };
 	}
 
 	iterator end() const
 	{
-		if( 0 == stream.elemCount ) return { nullptr, stream.strideBytes };
+		if( 0 == elemCount ) return { nullptr, strideBytes };
 
-		HP_ASSERT( sizeof( T ) == ( stream.componentCount * stream.componentByteSize ) );
-		HP_ASSERT( stream.strideBytes >= sizeof( T ) );
-		return { stream.data + stream.elemCount * stream.strideBytes, stream.strideBytes };
-	}
-
-	u64 size() const noexcept { return stream.elemCount; }
-};
-
-template<typename T>
-inline auto AsStreamView( const gltf_attr_stream& s )
-{
-	return gltf_typed_stream_view<T>{ s };
-} 
-
-// TODO: we'll need to adjust the normal and tan stuff if we use !LEFT_HANDED
-struct gltf_mesh_view
-{
-	std::string                        name;
-	gltf_index_span                    indexStream;
-	gltf_attr_stream                   posStream;
-	gltf_attr_stream                   normStream;
-	gltf_attr_stream                   tanStream;
-	std::vector<gltf_attr_stream>      uvStreams;
-	i32                                materialIdx;
-
-	inline std::vector<u32> NormalizeIndexBuffer() const
-	{
-		std::vector<u32> normalized;
-		switch( indexStream.type )
-		{
-		case index_type::U8:
-		{
-			normalized.reserve( std::size( indexStream.u8Data ) );
-			for( u8 idx : indexStream.u8Data )
-			{
-				normalized.push_back( u32( idx ) );
-			}
-			break;
-		}
-		case index_type::U16:
-		{
-			normalized.reserve( std::size( indexStream.u16Data ) );
-			for( u16 idx : indexStream.u16Data )
-			{
-				normalized.push_back( u32( idx ) );
-			}
-			break;
-		}
-		case index_type::U32:
-		{
-			normalized.reserve( std::size( indexStream.u32Data ) );
-			for( u32 idx : indexStream.u32Data )
-			{
-				normalized.push_back( idx );
-			}
-			break;
-		}
-		}
-		return normalized;
-	}
-
-	inline raw_mesh GetRawMesh() const
-	{
-		std::vector<float3> tans;
-		tans.reserve( std::size( tanStream ) );
-
-		for( auto tanW : AsStreamView<float4>( tanStream ) )
-		{
-			tans.push_back( { tanW.x * tanW.w, tanW.y * tanW.w, tanW.z * tanW.w } );
-		}
-		std::vector<u32> indices = NormalizeIndexBuffer();
-
-		auto posView = AsStreamView<float3>( posStream );
-		auto normView = AsStreamView<float3>( normStream );
-		raw_mesh mesh = {
-			.name = std::move( name ),
-			.pos = { std::cbegin( posView ), std::cend( posView ) },
-			.normals = { std::cbegin( normView ), std::cend( normView ) },
-			.tans = std::move( tans ),
-			//.uvs = { std::cbegin( uvStream ), std::cend( uvStream ) },
-			.indices = std::move( indices ),
-			.materialIdx = materialIdx
-		};
-
-		return mesh;
+		HP_ASSERT( sizeof( T ) == ( componentCount * componentByteSize ) );
+		HP_ASSERT( strideBytes >= sizeof( T ) );
+		return { data + elemCount * strideBytes, strideBytes };
 	}
 };
 
@@ -447,35 +328,35 @@ struct gltf_processor
 			{
 				// NOTE: we impose only indexed meshes
 				HP_ASSERT( -1 != primMesh.indices );
-
-				const gltf_attr_stream idxStream = GetAttributeStream( model.accessors[ primMesh.indices ] );
-				// NOTE: gltf mandates this stream be present
-				const gltf_attr_stream posStream = GetAttributeStream( *GetAccessorByName( "POSITION", primMesh ) );
-
+				std::vector<u32> normalizedIndexBuffer = GetIndexBufferFromStream( model.accessors[ primMesh.indices ] );
+				
 				// NOTE: gltf guarentees that all present attr streams have the same element count 
-				gltf_mesh_view currentMesh = {
+				// NOTE: gltf mandates this stream be present
+				const gltf_typed_attr_stream<float3> posStream = {
+					GetRawAttributeStream( *GetAccessorByName( "POSITION", primMesh ) ) };
+				
+				raw_mesh mesh = {
 					.name = m.name.c_str(),
-					.indexStream = ( gltf_index_span ) idxStream,
-					.posStream = posStream,
+					.pos = { std::cbegin( posStream ), std::cend( posStream ) },
+					.indices = std::move( normalizedIndexBuffer ),
 					.materialIdx = primMesh.material
 				};
 
 				if( const tinygltf::Accessor* pAccessor = GetAccessorByName( "NORMAL", primMesh ); pAccessor )
 				{
-					currentMesh.normStream = GetAttributeStream( *pAccessor );
+					const gltf_typed_attr_stream<float3> normStream = { GetRawAttributeStream( *pAccessor ) };
+					mesh.normals = { std::cbegin( normStream ), std::cend( normStream ) };
 				}
 				if( const tinygltf::Accessor* pAccessor = GetAccessorByName( "TANGENT", primMesh ); pAccessor )
 				{
-					currentMesh.tanStream = GetAttributeStream( *pAccessor );
+					const gltf_typed_attr_stream<float4> tanStream = { GetRawAttributeStream( *pAccessor ) };
+					mesh.tans = { std::cbegin( tanStream ), std::cend( tanStream ) };
 				}
-
-				//if( const tinygltf::Accessor* pAccessor = GetAccessorByName( "TEXCOORD_0", primMesh ); pAccessor )
-				//{
-				//	currentMesh.uvStreams.emplace_back( GetAttributeStream( *pAccessor ) );
-				//}
-				
-
-				raw_mesh mesh = currentMesh.GetRawMesh();
+				if( const tinygltf::Accessor* pAccessor = GetAccessorByName( "TEXCOORD_0", primMesh ); pAccessor )
+				{
+					const gltf_typed_attr_stream<float2> uvStream = { GetRawAttributeStream( *pAccessor ) };
+					mesh.uvs = { std::cbegin( uvStream ), std::cend( uvStream ) };
+				}
 				meshesOut.emplace_back( mesh );
 			}
 		}
@@ -680,7 +561,7 @@ struct gltf_processor
 
 	// NOTE: according to the spec https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#meshes
 	// we could just fix these attribute's size
-	inline gltf_attr_stream GetAttributeStream( const tinygltf::Accessor& accessor ) const
+	gltf_raw_attr_stream GetRawAttributeStream( const tinygltf::Accessor& accessor ) const
 	{
 		const i32 viewIdx = accessor.bufferView;
 		HP_ASSERT( -1 != viewIdx );
@@ -712,6 +593,42 @@ struct gltf_processor
 		//}
 
 		return { streamView, accessor.count, numComponents, componentSizeInBytes, strideInBytes };
+	}
+
+	auto GetIndexBufferFromStream( const tinygltf::Accessor& idxAccessor ) const
+	{
+		HP_ASSERT( TINYGLTF_TYPE_SCALAR == idxAccessor.type );
+
+		gltf_raw_attr_stream rawIdxStream = GetRawAttributeStream( idxAccessor );
+
+		HP_ASSERT( ( std::size( rawIdxStream ) % 3 ) == 0 );
+
+		std::vector<u32> normalized( std::size( rawIdxStream ) );
+
+		auto CasterLambda = [] ( auto v ) { return ( u32 ) v; }; 
+
+		switch( idxAccessor.componentType )
+		{
+		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+		{
+			gltf_typed_attr_stream<u8> typedIdxStream = { rawIdxStream };
+			std::ranges::copy( typedIdxStream | std::views::transform( CasterLambda ), std::begin( normalized ) );
+			break;
+		}
+		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+		{
+			gltf_typed_attr_stream<u16> typedIdxStream = { rawIdxStream };
+			std::ranges::copy( typedIdxStream | std::views::transform( CasterLambda ), std::begin( normalized ) );
+			break;
+		}
+		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
+		{
+			gltf_typed_attr_stream<u32> typedIdxStream = { rawIdxStream };
+			std::ranges::copy( typedIdxStream, std::begin( normalized ) );
+			break;
+		}
+		}
+		return normalized;
 	}
 
 	static inline alpha_mode GltfAlphaModeToEnum( std::string_view gltfAlphaMode )
@@ -785,34 +702,22 @@ struct gltf_processor
 	}
 };
 
-
-using snorm8x4 = u32;
-
-
-struct rt_meshlet_info
+struct rt_packed_meshlet_info
 {
 	float3	aabbMin;
 	float3	aabbMax;
 
 	u32    vertexOffset;
 	u32    triangleOffset;
-	u16    vertexCount;
-	u16    triangleCount;
+	u8     vertexCount;
+	u8     triangleCount;
 };
 
 struct rt_meshlets
 {
-	std::vector<rt_meshlet_info> desc;
+	std::vector<rt_packed_meshlet_info> desc;
 	std::vector<u32> vertices;
 	std::vector<u8> triangles;
-
-	//inline u64 GetDataSizeInBytes() const
-	//{
-	//	u64 szInBytes = SizeInBytes( vertices );
-	//	szInBytes += SizeInBytes( triangles );
-	//
-	//	return szInBytes;
-	//}
 };
 
 struct cluster_regular
@@ -830,12 +735,92 @@ struct cluster_raytracing
 	u16 maxTriangles = 64;
 };
 
+inline u32 corner_to_vertex_index( const raw_mesh& m, int face, int vert )
+{
+	// NOTE: face: [0..numFaces-1], vert: [0..2]
+	const u32 corner = face * 3u + vert;
+	return m.indices[corner];
+}
+
+inline int get_num_faces( const SMikkTSpaceContext* ctx )
+{
+	auto* m = ( raw_mesh* ) ( ctx->m_pUserData );
+	return std::size( m->indices ) / 3;
+}
+
+inline int get_num_verts_of_face( const SMikkTSpaceContext*, int )
+{
+	return 3;
+}
+
+inline void get_position( const SMikkTSpaceContext* ctx, float outPos[], int face, int vert )
+{
+	auto* m = ( raw_mesh* ) ( ctx->m_pUserData );
+	const u32 vi = corner_to_vertex_index( *m, face, vert );
+	const float3 p = m->pos[vi];
+	outPos[ 0 ] = p.x; outPos[ 1 ] = p.y; outPos[ 2 ] = p.z;
+}
+
+inline void get_normal( const SMikkTSpaceContext* ctx, float outN[], int face, int vert )
+{
+	auto* m = ( raw_mesh* ) ( ctx->m_pUserData );
+	const u32 vi = corner_to_vertex_index( *m, face, vert );
+	const float3 n = m->normals[ vi ];
+	outN[ 0 ] = n.x; outN[ 1 ] = n.y; outN[ 2 ] = n.z;
+}
+
+inline void get_texcoord( const SMikkTSpaceContext* ctx, float outUV[], int face, int vert )
+{
+	auto* m = ( raw_mesh* ) ( ctx->m_pUserData );
+	const u32 vi = corner_to_vertex_index( *m, face, vert );
+	const float2 uv = m->uvs[ vi ];
+	outUV[ 0 ] = uv.x; outUV[ 1 ] = uv.y;
+}
+
+inline void set_tspace_basic(
+	const SMikkTSpaceContext* ctx,
+	const float tangent[], 
+	float sign,
+	int face, 
+	int vert
+) {
+	auto* m = ( raw_mesh* ) ( ctx->m_pUserData );
+	const u32 vi = corner_to_vertex_index(*m, face, vert);
+
+	// MikkTSpace may call this multiple times for the same vi (shared vertex across faces).
+	// If your mesh is "regular" and you want the final averaged tangent, overwriting is fine:
+	// the algorithm’s internal accumulation decides the final tangent per corner/vertex.
+	//
+	// If you later discover mismatches at seams, it means your indices were NOT split.
+	m->tans[ vi ] = { tangent[ 0 ], tangent[ 1 ], tangent[ 2 ], sign };
+}
+
+
 // TODO: add hierarchical lod
-struct mesh_pipeline
+struct meshopt_pipeline
 {
 	raw_mesh& rawMesh;
 
-	mesh_pipeline( raw_mesh& rawMesh ) : rawMesh{ rawMesh } {}
+	meshopt_pipeline( raw_mesh& rawMesh ) : rawMesh{ rawMesh } {}
+
+	inline void ComputeMikkTSpaceTangentsInplace()
+	{
+		rawMesh.tans.resize( std::size( rawMesh.pos ), float4{ 0,0,0,1 } );
+
+		SMikkTSpaceInterface iface = {
+			.m_getNumFaces = get_num_faces,
+			.m_getNumVerticesOfFace = get_num_verts_of_face,
+			.m_getPosition = get_position,
+			.m_getNormal = get_normal,
+			.m_getTexCoord = get_texcoord,
+			.m_setTSpaceBasic = set_tspace_basic,
+		};
+
+		SMikkTSpaceContext ctx = { .m_pInterface = &iface, .m_pUserData = &rawMesh };
+
+		// NOTE: Returns 1 on success, 0 on failure (degenerates etc.)
+		HP_ASSERT( 1 == genTangSpaceDefault( &ctx ) );
+	}
 
 	void ReindexAndOptimizeMesh()
 	{
@@ -947,16 +932,22 @@ struct mesh_pipeline
 	rt_meshlets PackMeshletsRaytracing( const meshop_mlets& meshlets )
 	{
 		std::span<const float3> pos = rawMesh.pos;
+		std::span<const float3> norm = rawMesh.normals;
+		std::span<const float4> tan = rawMesh.tans;
+		std::span<const float2> uvs = rawMesh.uvs;
 
-		std::vector<rt_meshlet_info> mletsDesc;
+		std::vector<rt_packed_meshlet_info> mletsDesc;
 		mletsDesc.reserve( std::size( meshlets.ranges ) );
 		for( const meshopt_Meshlet& m : meshlets.ranges )
 		{
 			auto mletPosStream = GetMeshletLocalAttrStream( pos, meshlets.vertices, m.vertex_offset, m.vertex_count );
+			auto mletNormStream = GetMeshletLocalAttrStream( norm, meshlets.vertices, m.vertex_offset, m.vertex_count );
+			auto mletTanStream = GetMeshletLocalAttrStream( tan, meshlets.vertices, m.vertex_offset, m.vertex_count );
+			auto mletUvStream = GetMeshletLocalAttrStream( uvs, meshlets.vertices, m.vertex_offset, m.vertex_count );
 			
 			const aabb_t<float3> aabb = ComputeAabb( mletPosStream );
 
-			const rt_meshlet_info mlet = {
+			const rt_packed_meshlet_info mlet = {
 				.aabbMin = aabb.min,
 				.aabbMax = aabb.max,
 				.vertexOffset = m.vertex_offset,
@@ -979,8 +970,19 @@ int main()
 
 	gltf_processor gltf = { gltfFilePath };
 
-	auto rawMeshVec = gltf.ProcessMeshes();
+	std::vector<raw_mesh> rawMeshes = gltf.ProcessMeshes();
 
-    std::cout << "Hello World!\n";
+	for( raw_mesh& m : rawMeshes )
+	{
+		meshopt_pipeline optPipeline = { m };
+
+		if( !std::size( m.tans ) )
+		{
+			optPipeline.ComputeMikkTSpaceTangentsInplace();
+		}
+
+		auto meshlets = optPipeline.MakeMeshletsRaytracing( m.pos, m.indices, cluster_raytracing{} );
+		auto dick = optPipeline.PackMeshletsRaytracing( meshlets );
+	}
 }
 
