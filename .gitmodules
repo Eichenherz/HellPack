@@ -7,3 +7,6 @@
 [submodule "3rdParty/MikkTSpace"]
 	path = 3rdParty/MikkTSpace
 	url = https://github.com/mmikk/MikkTSpace.git
+[submodule "3rdParty/madmannbvh"]
+	path = 3rdParty/madmannbvh
+	url = https://github.com/madmann91/bvh.git

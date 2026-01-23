@@ -4,7 +4,6 @@
 #define TINYGLTF_NOEXCEPTION
 #include <tinygltf/tiny_gltf.h>
 #include <meshoptimizer.h>
-#include <mikktspace.h>
 
 #include <iostream>
 #include <filesystem>
@@ -16,15 +15,11 @@ namespace fs = std::filesystem;
 #include "core_types.h"
 #include "hp_error.h"
 #include "hp_math.h"
+#include "hp_types.h"
+#include "hp_bvh.h"
+#include "hp_encoding.h"
 
-struct alignas( 16 ) packed_trs
-{
-	float3 t;
-	float pad0;
-	float4 r;
-	float3 s;
-	float pad1;
-};
+#include "mikkt_space.h"
 
 inline packed_trs XM_CALLCONV XMComposePackedTRS( packed_trs a, packed_trs b )
 {
@@ -47,26 +42,6 @@ inline packed_trs XM_CALLCONV XMComposePackedTRS( packed_trs a, packed_trs b )
 
 	return { .t = outT, .r = outR, .s = outS };
 }
-
-struct gltf_node
-{
-	packed_trs transform;
-	i32 meshIdx;
-};
-
-constexpr bool LEFT_HANDED = true;
-static_assert( LEFT_HANDED );
-
-struct raw_mesh
-{
-	std::string name;
-	std::vector<float3> pos;
-	std::vector<float3> normals;
-	std::vector<float4> tans;
-	std::vector<float2> uvs;
-	std::vector<u32> indices;
-	i32 materialIdx;
-};
 
 struct gltf_raw_attr_stream
 {
@@ -265,7 +240,7 @@ struct gltf_processor
 		std::cout << "Successfully loaded the file.\n";
 	}
 
-	std::vector<gltf_node> ProcessNodes() const
+	std::vector<raw_node> ProcessNodes() const
 	{
 		const std::vector<tinygltf::Node>& nodes = model.nodes;
 
@@ -278,7 +253,7 @@ struct gltf_processor
 		// NOTE: we need this bc our tree is flattened
 		std::vector<bool> visited( std::size( nodes ), false );
 
-		std::vector<gltf_node> flatNodes;
+		std::vector<raw_node> flatNodes;
 		flatNodes.reserve( std::size( nodes ) );
 
 		for( u32 nodeIdx = 0; nodeIdx < std::size( nodes ); ++nodeIdx )
@@ -702,266 +677,194 @@ struct gltf_processor
 	}
 };
 
-struct rt_packed_meshlet_info
-{
-	float3	aabbMin;
-	float3	aabbMax;
 
-	u32    vertexOffset;
-	u32    triangleOffset;
-	u8     vertexCount;
-	u8     triangleCount;
-};
-
-struct rt_meshlets
+void ReindexAndOptimizeMesh( raw_mesh& rawMesh )
 {
-	std::vector<rt_packed_meshlet_info> desc;
+	meshopt_Stream attrStreams[] = {
+		{ .data = std::data( rawMesh.pos ), .size = std::size( rawMesh.pos ), .stride = sizeof( rawMesh.pos[ 0 ] ) },
+		{ .data = std::data( rawMesh.normals ), .size = std::size( rawMesh.normals ), .stride = sizeof( rawMesh.normals[ 0 ] ) },
+		{ .data = std::data( rawMesh.tans ), .size = std::size( rawMesh.tans ), .stride = sizeof( rawMesh.tans[ 0 ] ) },
+		{ .data = std::data( rawMesh.uvs ), .size = std::size( rawMesh.uvs ), .stride = sizeof( rawMesh.uvs[ 0 ] ) },
+	};
+	std::vector<u32>& indices = rawMesh.indices;
+
+	const u64 vtxCount = std::size( rawMesh.pos );
+	const u64 idxCount = std::size( indices );
+
+	std::vector<u32> remap( vtxCount );
+	u64 newVtxCount = meshopt_generateVertexRemapMulti(
+		std::data( remap ), std::data( indices ), idxCount, vtxCount, attrStreams, std::size( attrStreams ) );
+
+	HP_ASSERT( newVtxCount <= vtxCount );
+	if( newVtxCount != vtxCount )
+	{
+		meshopt_remapIndexBuffer( std::data( indices ), std::data( indices ), idxCount, std::data( remap ) );
+		meshopt_remapVertexBuffer( std::data( rawMesh.pos ), std::data( rawMesh.pos ), vtxCount, 
+								   sizeof( rawMesh.pos[ 0 ] ), std::data( remap ) );
+		rawMesh.pos.resize( newVtxCount );
+		meshopt_remapVertexBuffer( std::data( rawMesh.normals ), std::data( rawMesh.normals ), vtxCount, 
+								   sizeof( rawMesh.normals[ 0 ] ), std::data( remap ) );
+		rawMesh.normals.resize( newVtxCount );
+		meshopt_remapVertexBuffer( std::data( rawMesh.tans ), std::data( rawMesh.tans ), vtxCount, 
+								   sizeof( rawMesh.tans[ 0 ] ), std::data( remap ) );
+		rawMesh.tans.resize( newVtxCount );
+		meshopt_remapVertexBuffer( std::data( rawMesh.uvs ), std::data( rawMesh.uvs ), vtxCount, 
+								   sizeof( rawMesh.uvs[ 0 ] ), std::data( remap ) );
+		rawMesh.uvs.resize( newVtxCount );
+	}
+
+	meshopt_optimizeVertexCache( std::data( indices ), std::data( indices ), idxCount, newVtxCount );
+
+	meshopt_optimizeVertexFetch( std::data( rawMesh.pos ), std::data( indices ), idxCount, std::data( rawMesh.pos ), 
+								 newVtxCount, sizeof( rawMesh.pos[ 0 ] ) );
+	meshopt_optimizeVertexFetch( std::data( rawMesh.normals ), std::data( indices ), idxCount, std::data( rawMesh.normals ), 
+								 newVtxCount, sizeof( rawMesh.normals[ 0 ] ) );
+	meshopt_optimizeVertexFetch( std::data( rawMesh.tans ), std::data( indices ), idxCount, std::data( rawMesh.tans ), 
+								 newVtxCount, sizeof( rawMesh.tans[ 0 ] ) );
+	meshopt_optimizeVertexFetch( std::data( rawMesh.uvs ), std::data( indices ), idxCount, std::data( rawMesh.uvs ), 
+								 newVtxCount, sizeof( rawMesh.uvs[ 0 ] ) );
+}
+
+struct __meshopt_meshlets
+{
+	std::vector<meshopt_Meshlet> info;
 	std::vector<u32> vertices;
 	std::vector<u8> triangles;
 };
 
-struct cluster_regular
-{
-	float coneWeight = 0.8f;
-	u16 maxVertices = 64;
-	u16 maxTriangles = 128;
-};
-
-struct cluster_raytracing
-{
-	float fillWeight = 0.5f;
-	u16 maxVertices = 64;
-	u16 minTriangles = 16;
-	u16 maxTriangles = 64;
-};
-
-inline u32 corner_to_vertex_index( const raw_mesh& m, int face, int vert )
-{
-	// NOTE: face: [0..numFaces-1], vert: [0..2]
-	const u32 corner = face * 3u + vert;
-	return m.indices[corner];
-}
-
-inline int get_num_faces( const SMikkTSpaceContext* ctx )
-{
-	auto* m = ( raw_mesh* ) ( ctx->m_pUserData );
-	return std::size( m->indices ) / 3;
-}
-
-inline int get_num_verts_of_face( const SMikkTSpaceContext*, int )
-{
-	return 3;
-}
-
-inline void get_position( const SMikkTSpaceContext* ctx, float outPos[], int face, int vert )
-{
-	auto* m = ( raw_mesh* ) ( ctx->m_pUserData );
-	const u32 vi = corner_to_vertex_index( *m, face, vert );
-	const float3 p = m->pos[vi];
-	outPos[ 0 ] = p.x; outPos[ 1 ] = p.y; outPos[ 2 ] = p.z;
-}
-
-inline void get_normal( const SMikkTSpaceContext* ctx, float outN[], int face, int vert )
-{
-	auto* m = ( raw_mesh* ) ( ctx->m_pUserData );
-	const u32 vi = corner_to_vertex_index( *m, face, vert );
-	const float3 n = m->normals[ vi ];
-	outN[ 0 ] = n.x; outN[ 1 ] = n.y; outN[ 2 ] = n.z;
-}
-
-inline void get_texcoord( const SMikkTSpaceContext* ctx, float outUV[], int face, int vert )
-{
-	auto* m = ( raw_mesh* ) ( ctx->m_pUserData );
-	const u32 vi = corner_to_vertex_index( *m, face, vert );
-	const float2 uv = m->uvs[ vi ];
-	outUV[ 0 ] = uv.x; outUV[ 1 ] = uv.y;
-}
-
-inline void set_tspace_basic(
-	const SMikkTSpaceContext* ctx,
-	const float tangent[], 
-	float sign,
-	int face, 
-	int vert
+__meshopt_meshlets MakeMeshletsRaytracing( 
+	std::span<const float3> pos, 
+	std::span<const u32> indices, 
+	cluster_raytracing clusterConfig 
 ) {
-	auto* m = ( raw_mesh* ) ( ctx->m_pUserData );
-	const u32 vi = corner_to_vertex_index(*m, face, vert);
+	const u64 indexCount = std::size( indices );
 
-	// MikkTSpace may call this multiple times for the same vi (shared vertex across faces).
-	// If your mesh is "regular" and you want the final averaged tangent, overwriting is fine:
-	// the algorithm’s internal accumulation decides the final tangent per corner/vertex.
-	//
-	// If you later discover mismatches at seams, it means your indices were NOT split.
-	m->tans[ vi ] = { tangent[ 0 ], tangent[ 1 ], tangent[ 2 ], sign };
+	// NOTE ( meshoptimizer ): use minTriangles to compute worst case bound
+	const u64 maxMeshletCount = meshopt_buildMeshletsBound( indexCount, clusterConfig.maxVertices, clusterConfig.minTriangles );
+	std::vector<meshopt_Meshlet> meshlets( maxMeshletCount );
+	std::vector<u32> mletVtx( indexCount );
+	std::vector<u8> mletTris( indexCount );
+
+	const u64 meshletCount = meshopt_buildMeshletsSpatial( 
+		std::data( meshlets ), std::data( mletVtx ), std::data( mletTris ), std::data( indices ), std::size( indices ), 
+		&pos[ 0 ].x, std::size( pos ), sizeof( pos[ 0 ] ), clusterConfig.maxVertices, 
+		clusterConfig.minTriangles, clusterConfig.maxTriangles, clusterConfig.fillWeight);
+
+	const meshopt_Meshlet& last = meshlets[ meshletCount - 1 ];
+
+	meshlets.resize( meshletCount );
+	mletVtx.resize( ( u64 ) last.vertex_offset + last.vertex_count );
+	mletTris.resize( ( u64 ) last.triangle_offset + ( ( ( u64 ) last.triangle_count * 3 + 3 ) & ~3 ) );
+
+	for( const meshopt_Meshlet& m : meshlets )
+	{
+		meshopt_optimizeMeshlet( &mletVtx[ m.vertex_offset ], &mletTris[ m.triangle_offset ],
+								 m.triangle_count, m.vertex_count );
+	}
+
+	return { 
+		.info = std::move( meshlets ), 
+		.vertices = std::move( mletVtx ), 
+		.triangles = std::move( mletTris ) 
+	};
+}
+
+template<typename T> 
+inline auto GetMeshletLocalAttrStream( 
+	std::span<const T> meshAttrStream, 
+	std::span<const u32> mletVtx, 
+	u64 mletVtxOffset, 
+	u64 mletVtxCount 
+){
+	std::vector<T> localStream( mletVtxCount );
+	for( u64 vi = 0; vi < std::size( localStream ); ++vi )
+	{
+		localStream[ vi ] = meshAttrStream[ mletVtx[ vi + mletVtxOffset ] ];
+	}
+
+	return localStream;
+}
+
+auto PackMeshletsRaytracing( const raw_mesh& rawMesh )
+{
+	__meshopt_meshlets meshlets = MakeMeshletsRaytracing( rawMesh.pos, rawMesh.indices, cluster_raytracing{} );
+
+	std::span<const float3> pos = rawMesh.pos;
+	std::span<const float3> norm = rawMesh.normals;
+	std::span<const float4> tan = rawMesh.tans;
+	std::span<const float2> uvs = rawMesh.uvs;
+
+	std::vector<rt_meshlet> packedMeshlets;
+	packedMeshlets.reserve( std::size( meshlets.info ) );
+
+	for( const meshopt_Meshlet& m : meshlets.info )
+	{
+		auto firstTriangleIt = std::cbegin( meshlets.triangles ) + m.triangle_offset;
+		std::vector<u8> triangles = { firstTriangleIt, firstTriangleIt + m.triangle_count };
+
+		std::vector<float3> mletPosStream = GetMeshletLocalAttrStream( pos, meshlets.vertices, m.vertex_offset, m.vertex_count );
+
+		const aabb_t<float3> aabb = ComputeAabb( mletPosStream );
+
+		auto mletNormStream = GetMeshletLocalAttrStream( norm, meshlets.vertices, m.vertex_offset, m.vertex_count );
+		auto mletTanStream = GetMeshletLocalAttrStream( tan, meshlets.vertices, m.vertex_offset, m.vertex_count );
+		auto mletUvStream = GetMeshletLocalAttrStream( uvs, meshlets.vertices, m.vertex_offset, m.vertex_count );
+
+		std::vector<packed_vtx> packedAttrs( std::size( mletNormStream ) );
+		for( u64 vi = 0; vi < m.vertex_count; ++vi )
+		{
+			float3 n = mletNormStream[ vi ];
+			float4 t = mletTanStream[ vi ];
+			float2 uv = mletUvStream[ vi ];
+			float2 octNormal = OctaNormalEncode( n );
+			float tanAngle = EncodeTanToAngle( n, { t.x,t.y,t.z } );
+			u8 tanSign = ( -1.0f == t.w ) ? 1 : 0;
+
+			packedAttrs[ vi ] = {
+				.octNormal = octNormal, 
+				.tanAngle = tanAngle, 
+				.u = uv.x, .v = uv.y, 
+				.tanSign = tanSign 
+			};
+		}
+
+		rt_meshlet rtMeshlet = {
+			.positions = std::move( mletPosStream ), 
+			.packedAttrs = std::move( packedAttrs ), 
+			.triangles = std::move( triangles ),
+			.aabbMin = aabb.min, 
+			.aabbMax = aabb.max 
+		};
+		packedMeshlets.push_back( std::move( rtMeshlet ) );
+	}
+
+	return packedMeshlets;
 }
 
 
-// TODO: add hierarchical lod
-struct meshopt_pipeline
+struct instance
 {
-	raw_mesh& rawMesh;
-
-	meshopt_pipeline( raw_mesh& rawMesh ) : rawMesh{ rawMesh } {}
-
-	inline void ComputeMikkTSpaceTangentsInplace()
-	{
-		rawMesh.tans.resize( std::size( rawMesh.pos ), float4{ 0,0,0,1 } );
-
-		SMikkTSpaceInterface iface = {
-			.m_getNumFaces = get_num_faces,
-			.m_getNumVerticesOfFace = get_num_verts_of_face,
-			.m_getPosition = get_position,
-			.m_getNormal = get_normal,
-			.m_getTexCoord = get_texcoord,
-			.m_setTSpaceBasic = set_tspace_basic,
-		};
-
-		SMikkTSpaceContext ctx = { .m_pInterface = &iface, .m_pUserData = &rawMesh };
-
-		// NOTE: Returns 1 on success, 0 on failure (degenerates etc.)
-		HP_ASSERT( 1 == genTangSpaceDefault( &ctx ) );
-	}
-
-	void ReindexAndOptimizeMesh()
-	{
-		meshopt_Stream attrStreams[] = {
-			{ .data = std::data( rawMesh.pos ), .size = std::size( rawMesh.pos ), .stride = sizeof( rawMesh.pos[ 0 ] ) },
-			{ .data = std::data( rawMesh.normals ), .size = std::size( rawMesh.normals ), .stride = sizeof( rawMesh.normals[ 0 ] ) },
-			{ .data = std::data( rawMesh.tans ), .size = std::size( rawMesh.tans ), .stride = sizeof( rawMesh.tans[ 0 ] ) },
-			{ .data = std::data( rawMesh.uvs ), .size = std::size( rawMesh.uvs ), .stride = sizeof( rawMesh.uvs[ 0 ] ) },
-		};
-		std::vector<u32>& indices = rawMesh.indices;
-
-		const u64 vtxCount = std::size( rawMesh.pos );
-		const u64 idxCount = std::size( indices );
-
-		std::vector<u32> remap( vtxCount );
-		u64 newVtxCount = meshopt_generateVertexRemapMulti(
-			std::data( remap ), std::data( indices ), idxCount, vtxCount, attrStreams, std::size( attrStreams ) );
-
-		HP_ASSERT( newVtxCount <= vtxCount );
-		if( newVtxCount != vtxCount )
-		{
-			meshopt_remapIndexBuffer( std::data( indices ), std::data( indices ), idxCount, std::data( remap ) );
-			meshopt_remapVertexBuffer( std::data( rawMesh.pos ), std::data( rawMesh.pos ), vtxCount, 
-									   sizeof( rawMesh.pos[ 0 ] ), std::data( remap ) );
-			rawMesh.pos.resize( newVtxCount );
-			meshopt_remapVertexBuffer( std::data( rawMesh.normals ), std::data( rawMesh.normals ), vtxCount, 
-									   sizeof( rawMesh.normals[ 0 ] ), std::data( remap ) );
-			rawMesh.normals.resize( newVtxCount );
-			meshopt_remapVertexBuffer( std::data( rawMesh.tans ), std::data( rawMesh.tans ), vtxCount, 
-									   sizeof( rawMesh.tans[ 0 ] ), std::data( remap ) );
-			rawMesh.tans.resize( newVtxCount );
-			meshopt_remapVertexBuffer( std::data( rawMesh.uvs ), std::data( rawMesh.uvs ), vtxCount, 
-									   sizeof( rawMesh.uvs[ 0 ] ), std::data( remap ) );
-			rawMesh.uvs.resize( newVtxCount );
-		}
-
-		meshopt_optimizeVertexCache( std::data( indices ), std::data( indices ), idxCount, newVtxCount );
-
-		meshopt_optimizeVertexFetch( std::data( rawMesh.pos ), std::data( indices ), idxCount, std::data( rawMesh.pos ), 
-									 newVtxCount, sizeof( rawMesh.pos[ 0 ] ) );
-		meshopt_optimizeVertexFetch( std::data( rawMesh.normals ), std::data( indices ), idxCount, std::data( rawMesh.normals ), 
-									 newVtxCount, sizeof( rawMesh.normals[ 0 ] ) );
-		meshopt_optimizeVertexFetch( std::data( rawMesh.tans ), std::data( indices ), idxCount, std::data( rawMesh.tans ), 
-									 newVtxCount, sizeof( rawMesh.tans[ 0 ] ) );
-		meshopt_optimizeVertexFetch( std::data( rawMesh.uvs ), std::data( indices ), idxCount, std::data( rawMesh.uvs ), 
-									 newVtxCount, sizeof( rawMesh.uvs[ 0 ] ) );
-	}
-
-	struct meshop_mlets
-	{
-		std::vector<meshopt_Meshlet> ranges;
-		std::vector<u32> vertices;
-		std::vector<u8> triangles;
-	};
-
-	static meshop_mlets MakeMeshletsRaytracing( 
-		std::span<const float3> pos, 
-		std::span<const u32> indices, 
-		cluster_raytracing clusterConfig 
-	) {
-		const u64 indexCount = std::size( indices );
-
-		// NOTE (meshoptimizer): use minTriangles to compute worst case bound
-		const u64 maxMeshletCount = meshopt_buildMeshletsBound( indexCount, clusterConfig.maxVertices, clusterConfig.minTriangles );
-		std::vector<meshopt_Meshlet> meshlets( maxMeshletCount );
-		std::vector<u32> mletVtx( indexCount );
-		std::vector<u8> mletTris( indexCount );
-
-		const u64 meshletCount = meshopt_buildMeshletsSpatial( 
-			std::data( meshlets ), std::data( mletVtx ), std::data( mletTris ), std::data( indices ), std::size( indices ), 
-			&pos[ 0 ].x, std::size( pos ), sizeof( pos[ 0 ] ), clusterConfig.maxVertices, 
-			clusterConfig.minTriangles, clusterConfig.maxTriangles, clusterConfig.fillWeight);
-
-		const meshopt_Meshlet& last = meshlets[ meshletCount - 1 ];
-
-		meshlets.resize( meshletCount );
-		mletVtx.resize( ( u64 ) last.vertex_offset + last.vertex_count );
-		mletTris.resize( ( u64 ) last.triangle_offset + ( ( ( u64 ) last.triangle_count * 3 + 3 ) & ~3 ) );
-
-		for( const meshopt_Meshlet& m : meshlets )
-		{
-			meshopt_optimizeMeshlet( &mletVtx[ m.vertex_offset ], &mletTris[ m.triangle_offset ],
-									 m.triangle_count, m.vertex_count );
-		}
-
-		return { 
-			.ranges = std::move( meshlets ), 
-			.vertices = std::move( mletVtx ), 
-			.triangles = std::move( mletTris ) 
-		};
-	}
-
-	template<typename T> 
-	inline static auto GetMeshletLocalAttrStream( 
-		std::span<const T> meshAttrStream, 
-		std::span<const u32> mletVtx, 
-		u64 mletVtxOffset, 
-		u64 mletVtxCount 
-	){
-		std::vector<T> localStream( mletVtxCount );
-		for( u64 vi = 0; vi < std::size( localStream ); ++vi )
-		{
-			localStream[ vi ] = meshAttrStream[ mletVtx[ vi + mletVtxOffset ] ];
-		}
-		
-		return localStream;
-	}
-
-	rt_meshlets PackMeshletsRaytracing( const meshop_mlets& meshlets )
-	{
-		std::span<const float3> pos = rawMesh.pos;
-		std::span<const float3> norm = rawMesh.normals;
-		std::span<const float4> tan = rawMesh.tans;
-		std::span<const float2> uvs = rawMesh.uvs;
-
-		std::vector<rt_packed_meshlet_info> mletsDesc;
-		mletsDesc.reserve( std::size( meshlets.ranges ) );
-		for( const meshopt_Meshlet& m : meshlets.ranges )
-		{
-			auto mletPosStream = GetMeshletLocalAttrStream( pos, meshlets.vertices, m.vertex_offset, m.vertex_count );
-			auto mletNormStream = GetMeshletLocalAttrStream( norm, meshlets.vertices, m.vertex_offset, m.vertex_count );
-			auto mletTanStream = GetMeshletLocalAttrStream( tan, meshlets.vertices, m.vertex_offset, m.vertex_count );
-			auto mletUvStream = GetMeshletLocalAttrStream( uvs, meshlets.vertices, m.vertex_offset, m.vertex_count );
-			
-			const aabb_t<float3> aabb = ComputeAabb( mletPosStream );
-
-			const rt_packed_meshlet_info mlet = {
-				.aabbMin = aabb.min,
-				.aabbMax = aabb.max,
-				.vertexOffset = m.vertex_offset,
-				.triangleOffset = m.triangle_offset,
-				.vertexCount = ( u8 ) m.vertex_count,
-				.triangleCount = ( u8 ) m.triangle_count
-			};
-
-			mletsDesc.emplace_back( mlet );
-		}
-
-		return {};// std::move( mletsDesc ), std::move( mletVtx ), std::move( mletTris ) };
-	}
+	packed_trs toWorld;
+	u32 clasBvhRoot;
+	u32 baseMeshletOffset;
+	u32 meshletCount;
 };
+
+struct world_data
+{
+	std::vector<instance> instances;
+	std::vector<rt_packed_meshlet_info> meshletInfoBuffer;
+	std::vector<float3> globalVertexPosBuffer;
+	std::vector<packed_vtx> globalPackedVertexBuffer;
+	std::vector<u8> triangleBuffer;
+
+};
+
+template<typename T>
+inline auto PermutedView( std::vector<T>& src, const std::vector<u32>& remap )
+{
+	return remap | std::views::transform( [&]( u32 oldIdx ){ return src[ oldIdx ]; } );
+}
 
 int main()
 {
@@ -970,19 +873,29 @@ int main()
 
 	gltf_processor gltf = { gltfFilePath };
 
+	// TODO: ensure we keep the same indexing !!!!
+	std::vector<raw_node> rawNodes = gltf.ProcessNodes();
 	std::vector<raw_mesh> rawMeshes = gltf.ProcessMeshes();
 
-	for( raw_mesh& m : rawMeshes )
-	{
-		meshopt_pipeline optPipeline = { m };
+	world_data worldData = {};
 
+	bvh_builder bvhBuilder = {};
+
+	for( const raw_node& n : rawNodes )
+	{
+		if( INVALID_IDX == n.meshIdx ) continue;
+
+		raw_mesh& m = rawMeshes[ n.meshIdx ];
 		if( !std::size( m.tans ) )
 		{
-			optPipeline.ComputeMikkTSpaceTangentsInplace();
+			ComputeMikkTSpaceTangentsInplace( m );
 		}
 
-		auto meshlets = optPipeline.MakeMeshletsRaytracing( m.pos, m.indices, cluster_raytracing{} );
-		auto dick = optPipeline.PackMeshletsRaytracing( meshlets );
+		std::vector<rt_meshlet> packedMeshlets = PackMeshletsRaytracing( m );
+
+		auto bvh = bvhBuilder.BuildSweptSahFromRtMeshlets( packedMeshlets );
+
+		std::vector<gpu_bvh2_node> gpuBvh = bvhBuilder.LinearizeBvhDfsPacked_Recursive( bvh );
 	}
 }
 
