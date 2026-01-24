@@ -116,8 +116,8 @@ struct gltf_typed_attr_stream : gltf_raw_attr_stream
 
 template<typename T>
 concept TinyGltfTextureInfoConcept = requires( T a ) {
-	{ a.index } -> std::convertible_to<int>;
-	{ a.texCoord } -> std::convertible_to<int>;
+	{ a.index } -> std::convertible_to<i32>;
+	{ a.texCoord } -> std::convertible_to<i32>;
 };
 
 enum class gltf_img_components : u8
@@ -845,26 +845,90 @@ auto PackMeshletsRaytracing( const raw_mesh& rawMesh )
 struct instance
 {
 	packed_trs toWorld;
-	u32 clasBvhRoot;
+	bvh2_node_ref32 clasBvhRoot;
+	u32 clasNodeCount;
 	u32 baseMeshletOffset;
 	u32 meshletCount;
+	i32 materialIdx;
 };
 
 struct world_data
 {
 	std::vector<instance> instances;
-	std::vector<rt_packed_meshlet_info> meshletInfoBuffer;
+	std::vector<gpu_bvh2_node> globalTlasBuffer;
+	std::vector<gpu_bvh2_node> globalClasBuffer;
+	std::vector<rt_meshlet_info> meshletInfoBuffer;
 	std::vector<float3> globalVertexPosBuffer;
 	std::vector<packed_vtx> globalPackedVertexBuffer;
-	std::vector<u8> triangleBuffer;
+	std::vector<u8> globalTriangleBuffer;
 
+	range64 AppendMeshlets( const std::ranges::forward_range auto& meshlets )
+	{
+		HP_ASSERT( std::size( globalVertexPosBuffer ) == std::size( globalPackedVertexBuffer ) );
+		HP_ASSERT( std::size( globalVertexPosBuffer ) < u32( -1 ) );
+		HP_ASSERT( std::size( globalTriangleBuffer ) < u32( -1 ) );
+		HP_ASSERT( std::size( globalClasBuffer ) < u32( -1 ) );
+
+		u64 totalVertexCount = 0;
+		u64 totalTrianlgeCount = 0;
+		for( const rt_meshlet& m : meshlets )
+		{
+			const u64 vertexCount = std::size( m.positions );
+			const u64 triangleCount = std::size( m.triangles );
+
+			HP_ASSERT( vertexCount == std::size( m.packedAttrs ) );
+			HP_ASSERT( ( vertexCount <= u8( -1 ) ) && ( triangleCount <= u8( -1 ) ) );
+
+			totalVertexCount += vertexCount;
+			totalTrianlgeCount += triangleCount;
+		}
+		globalVertexPosBuffer.reserve( std::size( globalVertexPosBuffer ) + totalVertexCount );
+		globalPackedVertexBuffer.reserve( std::size( globalPackedVertexBuffer ) + totalVertexCount );
+		globalTriangleBuffer.reserve( std::size( globalTriangleBuffer ) + totalTrianlgeCount );
+
+		HP_ASSERT( std::size( meshletInfoBuffer ) <= u32( -1 ) );
+		const u32 baseMeshletOffset = ( u32 ) std::size( meshletInfoBuffer );
+		meshletInfoBuffer.reserve( baseMeshletOffset + std::size( meshlets ) );
+
+		for( const rt_meshlet& m : meshlets )
+		{
+			rt_meshlet_info info = {
+				.aabbMin = m.aabbMin,
+				.aabbMax = m.aabbMax,
+				.vertexOffset = ( u32 ) std::size( globalVertexPosBuffer ),
+				.triangleOffset = ( u32 ) std::size( globalTriangleBuffer ),
+				.vertexCount = ( u8 ) std::size( m.positions ),
+				.triangleCount = ( u8 ) std::size( m.triangles )
+			};
+
+			std::ranges::copy( m.positions, std::back_inserter( globalVertexPosBuffer ) );
+			std::ranges::copy( m.packedAttrs, std::back_inserter( globalPackedVertexBuffer ) );
+			std::ranges::copy( m.triangles, std::back_inserter( globalTriangleBuffer ) );
+			meshletInfoBuffer.push_back( info );
+		}
+
+		HP_ASSERT( std::size( meshlets ) <= u32( -1 ) );
+		return { .baseOffset = baseMeshletOffset, .count = ( u32 ) std::size( meshlets ) };
+	}
 };
 
-template<typename T>
-inline auto PermutedView( std::vector<T>& src, const std::vector<u32>& remap )
+template<typename T, typename Idx>
+inline auto PermutedView( std::vector<T>& src, const std::vector<Idx>& remap )
 {
-	return remap | std::views::transform( [&]( u32 oldIdx ){ return src[ oldIdx ]; } );
+	return remap | std::views::transform( [&]( Idx oldIdx ) -> T& { return src[ oldIdx ]; } );
 }
+
+template<typename T, typename Idx>
+inline auto PermutedView( const std::vector<T>& src, const std::vector<Idx>& remap )
+{
+	return remap | std::views::transform( [&]( Idx oldIdx ) -> const T& { return src[ oldIdx ]; } );
+}
+
+inline auto MeshletAabbView( const std::ranges::forward_range auto& meshlets )
+{
+	return meshlets | std::views::transform( 
+		[] ( const rt_meshlet& m ) { return aabb_t<float3>{ .min = m.aabbMin, .max = m.aabbMax }; } );
+};
 
 int main()
 {
@@ -881,21 +945,67 @@ int main()
 
 	bvh_builder bvhBuilder = {};
 
+	std::vector<aabb_t<float3>> tlasAabbs;
+	tlasAabbs.reserve( std::size( rawMeshes ) );
+
 	for( const raw_node& n : rawNodes )
 	{
 		if( INVALID_IDX == n.meshIdx ) continue;
 
-		raw_mesh& m = rawMeshes[ n.meshIdx ];
-		if( !std::size( m.tans ) )
+		raw_mesh& rawMesh = rawMeshes[ n.meshIdx ];
+		if( !std::size( rawMesh.tans ) )
 		{
-			ComputeMikkTSpaceTangentsInplace( m );
+			ComputeMikkTSpaceTangentsInplace( rawMesh );
 		}
 
-		std::vector<rt_meshlet> packedMeshlets = PackMeshletsRaytracing( m );
+		std::vector<rt_meshlet> packedMeshlets = PackMeshletsRaytracing( rawMesh );
+		HP_ASSERT( std::size( packedMeshlets ) != 0 );
 
-		auto bvh = bvhBuilder.BuildSweptSahFromRtMeshlets( packedMeshlets );
+		auto meshletAabbView = MeshletAabbView( packedMeshlets );
+		// NOTE: if we don't have at least 3 leaves worth of work we can skip the BVH
+		const bool buildBvhThresholdReached = std::size( meshletAabbView ) <= 2 * MAX_LEAF_PRIM_COUNT;
+		if( buildBvhThresholdReached )
+		{
+			auto[ baseMeshletOffset, meshletCount ] = worldData.AppendMeshlets( packedMeshlets );
 
-		std::vector<gpu_bvh2_node> gpuBvh = bvhBuilder.LinearizeBvhDfsPacked_Recursive( bvh );
+			aabb_t<float3> tlasAabb = MergeAabbs( meshletAabbView );
+			tlasAabbs.push_back( tlasAabb );
+
+			worldData.instances.push_back( {
+				.toWorld = n.toWorld,
+				.clasBvhRoot = BVH_INVALID_REF,
+				.clasNodeCount = 0,
+				.baseMeshletOffset = ( u32 ) baseMeshletOffset,
+				.meshletCount = ( u32 ) meshletCount,
+				.materialIdx = rawMesh.materialIdx
+			} );
+		}
+		else
+		{
+			bvh_output clasOutput = bvhBuilder.BuildBvhOverPrimitives( meshletAabbView );
+
+			const u32 bvhRootOffset = ( u32 ) std::size( worldData.globalClasBuffer );
+			const u32 clasNodeCount = ( u32 ) std::size( clasOutput.gpuNodes );
+			worldData.globalClasBuffer.reserve( bvhRootOffset + clasNodeCount ); // NOTE: just convenice to not type size( ... )
+			std::ranges::copy( clasOutput.gpuNodes, std::back_inserter( worldData.globalClasBuffer ) );
+
+			auto permutedView = PermutedView( packedMeshlets, clasOutput.primitiveIndices );
+			auto[ baseMeshletOffset, meshletCount ] = worldData.AppendMeshlets( permutedView );
+
+			tlasAabbs.push_back( clasOutput.topLevelAabb );
+
+			worldData.instances.push_back( {
+				.toWorld = n.toWorld,
+				.clasBvhRoot = bvhRootOffset,
+				.clasNodeCount = clasNodeCount,
+				.baseMeshletOffset = ( u32 ) baseMeshletOffset,
+				.meshletCount = ( u32 ) meshletCount,
+				.materialIdx = rawMesh.materialIdx
+			} );
+		}
 	}
+
+	bvh_output tlasOutput = bvhBuilder.BuildBvhOverPrimitives( tlasAabbs );
+	worldData.globalTlasBuffer = std::move( tlasOutput.gpuNodes );
 }
 

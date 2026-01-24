@@ -17,7 +17,7 @@ inline u32 corner_to_vertex_index( const raw_mesh& m, i32 face, i32 vert )
 inline i32 get_num_faces( const SMikkTSpaceContext* ctx )
 {
 	auto* m = ( raw_mesh* ) ( ctx->m_pUserData );
-	return std::size( m->indices ) / 3;
+	return ( i32 ) std::size( m->indices ) / 3;
 }
 inline i32 get_num_verts_of_face( const SMikkTSpaceContext*, i32 )
 {

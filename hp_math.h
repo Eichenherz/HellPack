@@ -118,4 +118,56 @@ inline aabb_t<float2> ComputeAabb( std::span<const float2> vertices )
 	return { min, max };
 }
 
+inline aabb_t<float3> MergeAabbPair( const aabb_t<float3>& a, const aabb_t<float3>& b )
+{
+	return {
+		.min = {
+			std::min( a.min.x, b.min.x ),
+			std::min( a.min.y, b.min.y ),
+			std::min( a.min.z, b.min.z ),
+		},
+		.max = {
+			std::max( a.max.x, b.max.x ),
+			std::max( a.max.y, b.max.y ),
+			std::max( a.max.z, b.max.z ),
+		}
+	};
+}
+
+inline aabb_t<float3> MergeAabbsMultiple( const std::ranges::forward_range auto& aabbs )
+{
+	aabb_t<float3> out = {
+		.min = { +FLT_MAX, +FLT_MAX, +FLT_MAX },
+		.max = { -FLT_MAX, -FLT_MAX, -FLT_MAX },
+	};
+
+	for( const auto& box : aabbs )
+	{
+		out = MergeAabbPair( out, { .min = box.min, .max = box.max } );
+	}
+
+	return out;
+}
+
+inline aabb_t<float3> MergeAabbs( const std::ranges::forward_range auto& aabbs )
+{
+	const u64 meshletCount = std::size( aabbs );
+
+	HP_ASSERT( meshletCount );
+	if( 1 == meshletCount )
+	{
+		return { .min = aabbs[ 0 ].min, .max = aabbs[ 0 ].max };
+	}
+
+	if( 2 == meshletCount )
+	{
+		return MergeAabbPair(
+			{ .min = aabbs[ 0 ].min, .max = aabbs[ 0 ].max },
+			{ .min = aabbs[ 1 ].min, .max = aabbs[ 1 ].max }
+		);
+	}
+
+	return MergeAabbsMultiple( aabbs );
+}
+
 #endif // !__HP_MATH_H__

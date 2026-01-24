@@ -13,6 +13,11 @@ using i16 = int16_t;
 using i32 = int32_t;
 using i64 = int64_t;
 
+struct range64
+{
+	u64 baseOffset : 32;
+	u64 count : 32;
+};
 
 template<typename T>
 concept Number32BitsMax = ( sizeof( T ) <= 4 );
