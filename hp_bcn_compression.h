@@ -84,12 +84,8 @@ inline auto GatherBlockRGBA8_Clamp( std::span<const u8> rgba8, u32 width, u32 he
 }
 
 
-inline auto CompressRBGA8ToBC7( 
-    std::span<const u8> rgba8, 
-    u16 width, 
-    u16 height, 
-    const bc7enc_compress_block_params& bc7CmpParams  
-) {
+inline auto CompressRBGA8ToBC7( std::span<const u8> rgba8, u16 width, u16 height ) 
+{
     constexpr u32 bcnBlockSzInBytes = BCnFormatToBlockSizeInBytes( bc_format_t::BC7_RGBA );
 
     u32 blocksX = ( width + 3u ) / 4u;
@@ -98,6 +94,9 @@ inline auto CompressRBGA8ToBC7(
     
     bcn_compression_result bcn = { blocksX, blocksY, bcnBlockSzInBytes };
 
+    // TODO: don't call these evey job ?
+    bc7enc_compress_block_params bc7CmpParams;
+    bc7enc_compress_block_params_init( &bc7CmpParams );
     bc7enc_compress_block_init();
     for( u32 bi = 0; bi < blockCount; ++bi )
     {
@@ -138,51 +137,20 @@ inline auto CompressRBGA8ToBC5( std::span<const u8> rgba8, u16 width, u16 height
     return bcn;
 }
 
-inline auto CompressRGBA8ToBCn( std::span<const bcn_compression_job> jobs, u32 threadCount ) 
+inline bcn_compression_result CompressRGBA8ToBCn( const bcn_compression_job& job ) 
 {
-    const u64 jobCount = std::size( jobs );
-    std::atomic<u32> atomicJobCounter = { 0 };
-
-    std::vector<bcn_compression_result> jobResults( jobCount );
-
-    bc7enc_compress_block_params bc7CmpParams;
-    bc7enc_compress_block_params_init( &bc7CmpParams );
-    
-    auto BCnWorkerLoop = [ &, jobCount ]()
+    if( bc_format_t::BC7_RGBA == job.format )
     {
-        for( ;; )
-        {
-            u32 jobIdx = atomicJobCounter.fetch_add( 1, std::memory_order_relaxed );
-            if( jobIdx >= jobCount ) break;
-
-            const bcn_compression_job& job = jobs[ jobIdx ];
-            bcn_compression_result& result = jobResults[ jobIdx ];
-
-            if( bc_format_t::BC7_RGBA == job.format )
-            {
-                result = CompressRBGA8ToBC7( job.rgba8, job.width, job.height, bc7CmpParams );
-            }
-            else if( bc_format_t::BC5_RG == job.format )
-            {
-                result = CompressRBGA8ToBC5( job.rgba8, job.width, job.height );
-            }
-            else
-            {
-                HP_ASSERT( false && "Unsupported type" );
-            }
-        }
-    };
-
-    std::vector<std::thread> threads;
-    threads.reserve( threadCount );
-
-    for( u32 t = 0; t < threadCount; ++t )
-    {
-        threads.emplace_back( BCnWorkerLoop );
+        return CompressRBGA8ToBC7( job.rgba8, job.width, job.height );
     }
-    for( auto& th : threads ) th.join();
-
-    return jobResults;
+    else if( bc_format_t::BC5_RG == job.format )
+    {
+        return CompressRBGA8ToBC5( job.rgba8, job.width, job.height );
+    }
+    else
+    {
+        HP_ASSERT( false && "Unsupported type" );
+    }
 }
 
 #endif // !__HP_BCN_COMPRESSION_H__

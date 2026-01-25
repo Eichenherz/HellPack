@@ -110,5 +110,8 @@
     <ClInclude Include="hp_bcn_compression.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="hp_serialization.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

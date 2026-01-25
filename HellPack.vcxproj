@@ -167,6 +167,7 @@
     <ClInclude Include="hp_material.h" />
     <ClInclude Include="hp_math.h" />
     <ClInclude Include="hp_mesh.h" />
+    <ClInclude Include="hp_serialization.h" />
     <ClInclude Include="mikkt_space.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

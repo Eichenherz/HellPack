@@ -22,6 +22,7 @@ namespace fs = std::filesystem;
 #include "hp_bvh.h"
 #include "hp_encoding.h"
 #include "hp_bcn_compression.h"
+#include "hp_serialization.h"
 #include "mikkt_space.h"
 
 inline packed_trs XM_CALLCONV XMComposePackedTRS( packed_trs a, packed_trs b )
@@ -833,7 +834,6 @@ auto PackMeshletsRaytracing( const raw_mesh& rawMesh )
 	return packedMeshlets;
 }
 
-
 struct instance
 {
 	packed_trs toWorld;
@@ -904,6 +904,29 @@ struct world_data
 	}
 };
 
+inline std::vector<u8> HellPackSerializeWorld( const world_data& w )
+{
+	byte_view bufs[] = {
+		MakeByteView( w.instances ),
+		MakeByteView( w.globalTlasBuffer ),
+		MakeByteView( w.globalClasBuffer ),
+		MakeByteView( w.meshletInfoBuffer ),
+		MakeByteView( w.globalVertexPosBuffer ),
+		MakeByteView( w.globalPackedVertexBuffer ),
+		MakeByteView( w.globalTriangleBuffer ),
+	};
+
+	HP_ASSERT( std::size( bufs ) == hellpack_entry_slot::COUNT );
+
+	return MakeHellpackBlob( bufs );
+}
+
+inline bool ByteEqual( std::span<const u8> a, std::span<const u8> b )
+{
+	bool sizeEq = std::size( a ) == std::size( b );
+	return sizeEq && ( std::memcmp( std::data( a ), std::data( b ), std::size( a ) ) == 0 );
+}
+
 template<typename T, typename Idx>
 inline auto PermutedView( std::vector<T>& src, const std::vector<Idx>& remap )
 {
@@ -922,18 +945,33 @@ inline auto MeshletAabbView( const std::ranges::forward_range auto& meshlets )
 		[] ( const rt_meshlet& m ) { return aabb_t<float3>{ .min = m.aabbMin, .max = m.aabbMax }; } );
 };
 
-auto PrepareBcnCompressionJobs( std::span<const material_info> materials, std::span<const raw_image_view> imageViews )
+struct texture_compression_batch
+{
+	ankerl::unordered_dense::map<u32,u32> imgViewToTexMap;
+	std::vector<bcn_compression_result> bcn;
+
+	std::vector<bcn_compression_job> jobs;
+	u32 size;
+
+	inline void ProcessItem( u32 jobIdx )
+	{
+		const bcn_compression_job& job = jobs[ jobIdx ];
+		bcn_compression_result& result = bcn[ jobIdx ];
+		// NOTE: these allocate memory !
+		result = CompressRGBA8ToBCn( job );
+	}
+};
+
+texture_compression_batch 
+PrepareBcnCompressionBatch( std::span<const material_info> materials, std::span<const raw_image_view> imageViews )
 {
 	std::vector<bcn_compression_job> jobs;
-
-	ankerl::unordered_dense::set<u32> visitedImages;
+	ankerl::unordered_dense::map<u32,u32> imgViewToTexMap;
 
 	auto ProcessImageView = [&] ( u16 idx, bc_format_t fmt )
 	{
 		if( !IsIndexValid( idx ) ) return;
-		if( visitedImages.find( idx ) != std::cend( visitedImages ) ) return;
-
-		visitedImages.emplace( idx );
+		if( imgViewToTexMap.find( idx ) != std::cend( imgViewToTexMap ) ) return;
 
 		const raw_image_view& imgView = imageViews[ idx ];
 		jobs.push_back( bcn_compression_job{
@@ -942,7 +980,10 @@ auto PrepareBcnCompressionJobs( std::span<const material_info> materials, std::s
 			.height = imgView.metadata.height, 
 			.format = fmt
 		} );
+
+		imgViewToTexMap.emplace( idx, std::size( jobs ) - 1 );
 	};
+
 	for( const material_info& material : materials )
 	{
 		ProcessImageView( material.baseColorIdx, bc_format_t::BC7_RGBA );
@@ -954,8 +995,81 @@ auto PrepareBcnCompressionJobs( std::span<const material_info> materials, std::s
 		ProcessImageView( material.emissiveIdx, bc_format_t::BC7_RGBA );
 	}
 
-	return jobs;
+	u32 batchSize = std::size( jobs );
+	std::vector<bcn_compression_result> bcn( batchSize );
+	return {
+		.imgViewToTexMap = std::move( imgViewToTexMap ),
+		.bcn = std::move( bcn ),
+		.jobs = std::move( jobs ),
+		.size = batchSize
+	};
 }
+
+// NOTE: RunBatch and Join must always be called in pairs !!!!
+struct batch_executor
+{
+	std::vector<std::jthread> threads;
+	std::atomic<u32> jobDoneCounter;
+
+	// NOTE: fetch add will increase past the batchSize
+	void RunBatch( auto& BatchProcessor, u32 workerCount, u32 batchSize ) 
+	{
+		auto WorkerLoop = [this, BatchProcessor, batchSize] ()
+		{
+			for( ;; )
+			{
+				u32 jobIdx = jobDoneCounter.fetch_add( 1, std::memory_order_relaxed );
+				if( jobIdx >= batchSize ) break;
+
+				BatchProcessor( jobIdx );
+			}
+		};
+
+		jobDoneCounter = { 0 };
+		threads.clear();
+		for( u32 ti = 0; ti < workerCount; ++ti )
+		{
+			threads.emplace_back( WorkerLoop );
+		}
+	}
+
+	void Join()
+	{
+		for( auto& t : threads ) t.join();
+	}
+};
+
+inline void WriteFileBinary( const char* path, std::span<const u8> bytes )
+{
+	FILE* f = nullptr;
+	HP_ASSERT( ::fopen_s( &f, path, "wb" ) == 0 );
+
+	u64 written = ::fwrite( std::data( bytes ), 1, std::size( bytes ), f );
+	HP_ASSERT( std::size( bytes ) == written );
+
+	i32 rc = ::fclose( f );
+	HP_ASSERT( rc == 0 );
+}
+
+inline auto ReadFileBinary( const char* path )
+{
+	FILE* f = nullptr;
+	HP_ASSERT( ::fopen_s( &f, path, "rb" ) == 0 );
+	HP_ASSERT( f );
+
+	HP_ASSERT( ::fseek( f, 0, SEEK_END ) == 0 );
+	i32 sz = ::ftell( f );
+	HP_ASSERT( sz >= 0 );
+	HP_ASSERT( ::fseek( f, 0, SEEK_SET ) == 0 );
+
+	std::vector<u8> out( sz );
+	u64 read = ::fread( std::data( out ), 1, std::size( out ), f );
+	HP_ASSERT( std::size( out ) == read );
+
+	HP_ASSERT( ::fclose( f ) == 0 );
+	return out;
+}
+
 int main()
 {
 	const std::string gltfFilePath = "D:/3d models/nightclub_futuristic_pub_ambience_asset.glb";
@@ -970,8 +1084,11 @@ int main()
 	std::vector<material_info> materials = gltf.ProcessMaterials();
 	std::vector<raw_image_view> imageViews = gltf.ProcessImages();
 
-	std::vector<bcn_compression_job> bcnCmpJobs = PrepareBcnCompressionJobs( materials, imageViews );
-	std::vector<bcn_compression_result> bcnRaw = CompressRGBA8ToBCn( bcnCmpJobs, std::size( bcnCmpJobs ) / 4 );
+	//texture_compression_batch bcnBatch = PrepareBcnCompressionBatch( materials, imageViews );
+	//
+	//batch_executor batchExec = {};
+	//auto Proc = [&] ( u32 idx ) { bcnBatch.ProcessItem( idx ); };
+	//batchExec.RunBatch( Proc, std::max<u32>( 1, bcnBatch.size / 4 ), bcnBatch.size );
 
 	world_data worldData = {};
 
@@ -1039,6 +1156,29 @@ int main()
 
 	bvh_output tlasOutput = bvhBuilder.BuildBvhOverPrimitives( tlasAabbs );
 	worldData.globalTlasBuffer = std::move( tlasOutput.gpuNodes );
+
+	std::vector<u8> blob = HellPackSerializeWorld( worldData );
+	WriteFileBinary( "D:/3d models/nightclub_futuristic_pub_ambience_asset.hllp", blob );
+	auto read = ReadFileBinary( "D:/3d models/nightclub_futuristic_pub_ambience_asset.hllp" );
+	hellpack_view hellpackView = { read };
+
+	byte_view bufs[] = {
+		MakeByteView( worldData.instances ),
+		MakeByteView( worldData.globalTlasBuffer ),
+		MakeByteView( worldData.globalClasBuffer ),
+		MakeByteView( worldData.meshletInfoBuffer ),
+		MakeByteView( worldData.globalVertexPosBuffer ),
+		MakeByteView( worldData.globalPackedVertexBuffer ),
+		MakeByteView( worldData.globalTriangleBuffer ),
+	};
+
+	for( u64 i : std::views::iota( 0u, hellpack_entry_slot::COUNT ) )
+	{
+		byte_view bv = hellpackView.Bytes( hellpack_entry_slot( i ) );
+		HP_ASSERT( ByteEqual( bv, bufs[ i ] ) );
+	}
+
+	//batchExec.Join();
 
 	return 0;
 }

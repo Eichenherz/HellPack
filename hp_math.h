@@ -170,4 +170,6 @@ inline aabb_t<float3> MergeAabbs( const std::ranges::forward_range auto& aabbs )
 	return MergeAabbsMultiple( aabbs );
 }
 
+inline u64 AlignUp( u64 x, u64 a ) { return ( x + ( a - 1 ) ) & ~( a - 1 ); }
+
 #endif // !__HP_MATH_H__

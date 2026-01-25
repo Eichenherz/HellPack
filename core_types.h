@@ -19,6 +19,12 @@ struct range64
 	u64 count : 32;
 };
 
+struct byte_range_t
+{
+	u64 baseOffset;
+	u64 count;
+};
+
 constexpr i32 INVALID_IDX = -1;
 
 template<typename T>
