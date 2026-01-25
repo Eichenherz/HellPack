@@ -1,12 +1,12 @@
-#ifndef __HP_TYPES_H__
-#define __HP_TYPES_H__
+#ifndef __HP_MESH_H__
+#define __HP_MESH_H__
 
 #include "core_types.h"
 #include "hp_math.h"
 
 #include <bit>
+#include <string>
 #include <vector>
-
 
 struct alignas( 16 ) packed_trs
 {
@@ -16,8 +16,6 @@ struct alignas( 16 ) packed_trs
 	float3 s;
 	float pad1;
 };
-
-constexpr i32 INVALID_IDX = -1;
 
 struct raw_node
 {
@@ -118,4 +116,4 @@ struct alignas( 64 ) gpu_bvh2_node
 	std::array<bvh2_node_ref32, 2> childIdx; 
 };
 
-#endif // !__HP_TYPES_H__
+#endif // !__HP_MESH_H__

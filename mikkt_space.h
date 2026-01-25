@@ -2,7 +2,7 @@
 #define __MIKKT_SPACE_H__
 
 #include "core_types.h"
-#include "hp_types.h"
+#include "hp_mesh.h"
 #include "hp_error.h"
 
 #include <mikktspace.h>

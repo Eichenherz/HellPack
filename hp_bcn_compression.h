@@ -1,0 +1,188 @@
+#ifndef __HP_BCN_COMPRESSION_H__
+#define __HP_BCN_COMPRESSION_H__
+
+#include "core_types.h"
+#include "hp_error.h"
+
+#include <bc7enc.h>
+#include <rgbcx.h>
+
+#include <atomic>
+#include <array>
+#include <thread>
+#include <span>
+#include <vector>
+
+constexpr u64 BLOCK_PIXEL_PITCH = 4;
+constexpr u64 BLOCK_SIZE_IN_BYTES = 4 * 4 * BLOCK_PIXEL_PITCH;
+constexpr u64 BC_57_BLOCK_SIZE_IN_BYTES = 16;
+
+
+enum class bc_format_t : u8
+{
+    BC7_RGBA = 0,
+    BC5_RG   = 1,
+};
+
+constexpr u32 BCnFormatToBlockSizeInBytes( bc_format_t fmt )
+{
+    using enum bc_format_t;
+    switch( fmt )
+    {
+    case BC7_RGBA: return BC7ENC_BLOCK_SIZE;
+    case BC5_RG: return 16;
+    default: HP_ASSERT( false && "Not implemented yet" );
+    }
+}
+
+struct bcn_compression_job
+{
+    std::span<const u8>     rgba8;
+    u16                     width;
+    u16                     height;
+    bc_format_t             format;
+};
+
+struct bcn_compression_result
+{
+    std::vector<u8>         data;
+
+    bcn_compression_result() = default;
+    bcn_compression_result( u64 blocksX, u64 blocksY, u64 blockSzInBytes )
+    {
+        data.resize( blocksX * blocksY * blockSzInBytes );
+    }
+};
+
+using rgba4x4 = std::array<u8, BLOCK_SIZE_IN_BYTES>;
+
+// TODO: check rowPitch !!!!
+inline auto GatherBlockRGBA8_Clamp( std::span<const u8> rgba8, u32 width, u32 height, u32 blockX, u32 blockY )
+{
+    rgba4x4 blockRGBA;
+    [[unroll]]
+    for( u32 by = 0; by < 4; ++by )
+    {
+        u32 y = blockY * 4u + by;
+        if( y >= height ) y = height - 1u;
+        [[unroll]]
+        for( u32 bx = 0; bx < 4; ++bx )
+        {
+            u32 x = blockX * 4u + bx;
+            if( x >= width ) x = width - 1u;
+
+            u64 src = ( y * width + x ) * BLOCK_PIXEL_PITCH;
+            u64 dst = ( by * 4u + bx ) * BLOCK_PIXEL_PITCH;
+
+            blockRGBA[ dst + 0 ] = rgba8[ src + 0 ];
+            blockRGBA[ dst + 1 ] = rgba8[ src + 1 ];
+            blockRGBA[ dst + 2 ] = rgba8[ src + 2 ];
+            blockRGBA[ dst + 3 ] = rgba8[ src + 3 ];
+        }
+    }
+    return blockRGBA;
+}
+
+
+inline auto CompressRBGA8ToBC7( 
+    std::span<const u8> rgba8, 
+    u16 width, 
+    u16 height, 
+    const bc7enc_compress_block_params& bc7CmpParams  
+) {
+    constexpr u32 bcnBlockSzInBytes = BCnFormatToBlockSizeInBytes( bc_format_t::BC7_RGBA );
+
+    u32 blocksX = ( width + 3u ) / 4u;
+    u32 blocksY = ( height + 3u ) / 4u;
+    u32 blockCount = blocksX * blocksY;
+    
+    bcn_compression_result bcn = { blocksX, blocksY, bcnBlockSzInBytes };
+
+    bc7enc_compress_block_init();
+    for( u32 bi = 0; bi < blockCount; ++bi )
+    {
+        u32 by = bi / blocksX;
+        u32 bx = bi - by * blocksX;
+
+        rgba4x4 blockRGBA = GatherBlockRGBA8_Clamp( rgba8, width, height, bx, by );
+        u8* pDstBlock = std::data( bcn.data ) + bi * bcnBlockSzInBytes;
+
+        bc7enc_compress_block( pDstBlock, std::data( blockRGBA ), &bc7CmpParams );
+    }
+
+    return bcn;
+}
+
+inline auto CompressRBGA8ToBC5( std::span<const u8> rgba8, u16 width, u16 height )
+{
+    constexpr u32 bcnBlockSzInBytes = BCnFormatToBlockSizeInBytes( bc_format_t::BC5_RG );
+
+    u32 blocksX = ( width + 3u ) / 4u;
+    u32 blocksY = ( height + 3u ) / 4u;
+    u32 blockCount = blocksX * blocksY;
+
+    bcn_compression_result bcn = { blocksX, blocksY, bcnBlockSzInBytes };
+
+    rgbcx::init( rgbcx::bc1_approx_mode::cBC1Ideal );
+    for( u32 bi = 0; bi < blockCount; ++bi )
+    {
+        u32 by = bi / blocksX;
+        u32 bx = bi - by * blocksX;
+
+        rgba4x4 blockRGBA = GatherBlockRGBA8_Clamp( rgba8, width, height, bx, by );
+        u8* pDstBlock = std::data( bcn.data ) + bi * bcnBlockSzInBytes;
+
+        rgbcx::encode_bc5( pDstBlock, std::data( blockRGBA ), 0, 1, 4u );
+    }
+
+    return bcn;
+}
+
+inline auto CompressRGBA8ToBCn( std::span<const bcn_compression_job> jobs, u32 threadCount ) 
+{
+    const u64 jobCount = std::size( jobs );
+    std::atomic<u32> atomicJobCounter = { 0 };
+
+    std::vector<bcn_compression_result> jobResults( jobCount );
+
+    bc7enc_compress_block_params bc7CmpParams;
+    bc7enc_compress_block_params_init( &bc7CmpParams );
+    
+    auto BCnWorkerLoop = [ &, jobCount ]()
+    {
+        for( ;; )
+        {
+            u32 jobIdx = atomicJobCounter.fetch_add( 1, std::memory_order_relaxed );
+            if( jobIdx >= jobCount ) break;
+
+            const bcn_compression_job& job = jobs[ jobIdx ];
+            bcn_compression_result& result = jobResults[ jobIdx ];
+
+            if( bc_format_t::BC7_RGBA == job.format )
+            {
+                result = CompressRBGA8ToBC7( job.rgba8, job.width, job.height, bc7CmpParams );
+            }
+            else if( bc_format_t::BC5_RG == job.format )
+            {
+                result = CompressRBGA8ToBC5( job.rgba8, job.width, job.height );
+            }
+            else
+            {
+                HP_ASSERT( false && "Unsupported type" );
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve( threadCount );
+
+    for( u32 t = 0; t < threadCount; ++t )
+    {
+        threads.emplace_back( BCnWorkerLoop );
+    }
+    for( auto& th : threads ) th.join();
+
+    return jobResults;
+}
+
+#endif // !__HP_BCN_COMPRESSION_H__

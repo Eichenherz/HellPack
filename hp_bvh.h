@@ -3,7 +3,7 @@
 
 #include "core_types.h"
 #include "hp_math.h"
-#include "hp_types.h"
+#include "hp_mesh.h"
 
 #include <bvh/v2/bvh.h>
 #include <bvh/v2/vec.h>

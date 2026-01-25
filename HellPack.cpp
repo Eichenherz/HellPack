@@ -12,13 +12,16 @@ namespace fs = std::filesystem;
 #include <span>
 #include <ranges>
 
+#include <ankerl/unordered_dense.h>
+
 #include "core_types.h"
 #include "hp_error.h"
 #include "hp_math.h"
-#include "hp_types.h"
+#include "hp_mesh.h"
+#include "hp_material.h"
 #include "hp_bvh.h"
 #include "hp_encoding.h"
-
+#include "hp_bcn_compression.h"
 #include "mikkt_space.h"
 
 inline packed_trs XM_CALLCONV XMComposePackedTRS( packed_trs a, packed_trs b )
@@ -62,6 +65,7 @@ struct gltf_typed_attr_stream : gltf_raw_attr_stream
 {
 	struct iterator
 	{
+		// NOTE: don't change these names !
 		using iterator_category = std::input_iterator_tag;
 		using value_type = T;
 		using difference_type = std::ptrdiff_t;
@@ -120,7 +124,7 @@ concept TinyGltfTextureInfoConcept = requires( T a ) {
 	{ a.texCoord } -> std::convertible_to<i32>;
 };
 
-enum class gltf_img_components : u8
+enum class image_channels_t : u8
 {
 	UNKNOWN = 0,
 	R = 1,
@@ -129,7 +133,7 @@ enum class gltf_img_components : u8
 	RGBA = 4
 };
 
-enum class gltf_img_bit_depth : u8
+enum class image_bit_depth_t : u8
 {
 	UNKNOWN = 0,
 	B8  = 8,
@@ -137,7 +141,7 @@ enum class gltf_img_bit_depth : u8
 	B32 = 32
 };
 
-enum class gltf_img_pixel_type : u8
+enum class image_pixel_type : u8
 {
 	UNKNOWN = 0,
 	UBYTE,
@@ -145,13 +149,13 @@ enum class gltf_img_pixel_type : u8
 	FLOAT32
 };
 
-struct gltf_image_metadata
+struct image_metadata
 {
-	i32 width;
-	i32 height;
-	gltf_img_components component;
-	gltf_img_bit_depth  bits;
-	gltf_img_pixel_type pixelType;
+	u16 width;
+	u16 height;
+	image_channels_t component;
+	image_bit_depth_t  bits;
+	image_pixel_type pixelType;
 };
 
 struct gltf_texture
@@ -160,18 +164,12 @@ struct gltf_texture
 	i32 samplerIdx = -1;
 };
 
-struct gltf_image
+struct raw_image_view
 {
 	std::span<const u8> data;
-	gltf_image_metadata metadata;
+	image_metadata metadata;
 };
 
-enum alpha_mode : u8
-{
-	ALPHA_MODE_OPAQUE,
-	ALPHA_MODE_MASK,
-	ALPHA_MODE_BLEND,
-};
 
 enum sampler_filter_mode_flags : u8
 {
@@ -217,6 +215,142 @@ constexpr sampler_config DEFAULT_SAMPLER = {
 	.wrapModeT = sampler_wrap_mode_flags::WRAP_REPEAT
 };
 
+// NOTE: gltf matrices are col maj, right-handed
+inline DirectX::XMMATRIX GetMatrix( std::span<const double> mIn )
+{
+	using namespace DirectX;
+	XMMATRIX m = XMMatrixSet(
+		( float ) mIn[ 0 ],	 ( float ) mIn[ 1 ],  ( float ) mIn[ 2 ],  ( float ) mIn[ 3 ],
+		( float ) mIn[ 4 ],	 ( float ) mIn[ 5 ],  ( float ) mIn[ 6 ],  ( float ) mIn[ 7 ],
+		( float ) mIn[ 8 ],	 ( float ) mIn[ 9 ],  ( float ) mIn[ 10 ], ( float ) mIn[ 11 ],
+		( float ) mIn[ 12 ], ( float ) mIn[ 13 ], ( float ) mIn[ 14 ], ( float ) mIn[ 15 ]
+	);
+
+	return XMMatrixTranspose( m );
+}
+inline packed_trs GetTrsFromNode( const tinygltf::Node& node )
+{
+	using namespace DirectX;
+
+	XMVECTOR xmT = XMVectorSet( 0, 0, 0, 0 );
+	XMVECTOR xmR = XMVectorSet( 0, 0, 0, 1 );
+	XMVECTOR xmS = XMVectorSet( 1, 1, 1, 0 );
+	if( std::size( node.matrix ) == 16 )
+	{
+		XMMATRIX m = GetMatrix( node.matrix );
+		if( !XMMatrixDecompose( &xmS, &xmR, &xmT, m ) )
+		{
+			xmT = XMVectorSet( 0, 0, 0, 0 );
+			xmR = XMVectorSet( 0, 0, 0, 1 );
+			xmS = XMVectorSet( 1, 1, 1, 0 );
+		}
+
+	}
+	else
+	{
+		if( std::size( node.translation ) == 3 )
+		{
+			xmT = XMVectorSet(
+				( float ) node.translation[ 0 ],
+				( float ) node.translation[ 1 ],
+				( float ) node.translation[ 2 ],
+				0.0f
+			);
+		}
+		if( std::size( node.rotation ) == 4 )
+		{
+			xmR = XMVectorSet(
+				( float ) node.rotation[ 0 ],
+				( float ) node.rotation[ 1 ],
+				( float ) node.rotation[ 2 ],
+				( float ) node.rotation[ 3 ]
+			);
+		}
+		if( std::size( node.scale ) == 3 )
+		{
+			xmS = XMVectorSet(
+				( float ) node.scale[ 0 ],
+				( float ) node.scale[ 1 ],
+				( float ) node.scale[ 2 ],
+				0.0f
+			);
+		}
+	}
+
+	float3 t;
+	float4 r;
+	float3 s;
+
+	XMStoreFloat3( &t, xmT );
+	XMStoreFloat4( &r, xmR );
+	XMStoreFloat3( &s, xmS );
+	return { .t = t, .r = r, .s = s };
+}
+
+inline alpha_mode GltfAlphaModeToEnum( std::string_view gltfAlphaMode )
+{
+	if( gltfAlphaMode == "MASK" )  return ALPHA_MODE_MASK;
+	if( gltfAlphaMode == "BLEND" ) return ALPHA_MODE_BLEND;
+	return ALPHA_MODE_OPAQUE;
+}
+inline sampler_filter_mode_flags GltfFilterToFlags( i32 gltfFilter )
+{
+	switch( gltfFilter )
+	{
+	case TINYGLTF_TEXTURE_FILTER_NEAREST:                return FILTER_NEAREST;
+	case TINYGLTF_TEXTURE_FILTER_LINEAR:                 return FILTER_LINEAR;
+	case TINYGLTF_TEXTURE_FILTER_NEAREST_MIPMAP_NEAREST: return FILTER_NEAREST_MIPMAP_NEAREST;
+	case TINYGLTF_TEXTURE_FILTER_LINEAR_MIPMAP_NEAREST:  return FILTER_LINEAR_MIPMAP_NEAREST;
+	case TINYGLTF_TEXTURE_FILTER_NEAREST_MIPMAP_LINEAR:  return FILTER_NEAREST_MIPMAP_LINEAR;
+	case TINYGLTF_TEXTURE_FILTER_LINEAR_MIPMAP_LINEAR:   return FILTER_LINEAR_MIPMAP_LINEAR;
+	default:                                             return FILTER_LINEAR;
+	}
+}
+inline sampler_wrap_mode_flags GltfWrapToFlags( i32 gltfWrap )
+{
+	switch( gltfWrap )
+	{
+	case TINYGLTF_TEXTURE_WRAP_CLAMP_TO_EDGE:   return WRAP_CLAMP_TO_EDGE;
+	case TINYGLTF_TEXTURE_WRAP_MIRRORED_REPEAT: return WRAP_MIRRORED_REPEAT;
+	case TINYGLTF_TEXTURE_WRAP_REPEAT:          return WRAP_REPEAT;
+	default:                                    return WRAP_CLAMP_TO_EDGE;
+	}
+}
+inline image_metadata GetGltfTextureMetadata( const tinygltf::Image& img )
+{
+	image_metadata out = {
+		.width = ( u16 ) img.width,
+		.height = ( u16 ) img.height,
+	};
+
+	switch( img.component )
+	{
+	case 1: out.component = image_channels_t::R; break;
+	case 2: out.component = image_channels_t::RG; break;
+	case 3: out.component = image_channels_t::RGB; break;
+	case 4: out.component = image_channels_t::RGBA; break;
+	default: out.component = image_channels_t::UNKNOWN;
+	}
+
+	switch( img.bits )
+	{
+	case 8:  out.bits = image_bit_depth_t::B8; break;
+	case 16: out.bits = image_bit_depth_t::B16; break;
+	case 32: out.bits = image_bit_depth_t::B32; break;
+	default: out.bits = image_bit_depth_t::UNKNOWN;
+	}
+
+	switch( img.pixel_type )
+	{
+	case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:  out.pixelType = image_pixel_type::UBYTE; break;
+	case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: out.pixelType = image_pixel_type::USHORT; break;
+	case TINYGLTF_COMPONENT_TYPE_FLOAT:          out.pixelType = image_pixel_type::FLOAT32; break;
+	default: out.pixelType = image_pixel_type::UNKNOWN;
+	}
+
+	return out;
+}
+
 struct gltf_processor
 {
 	tinygltf::Model model;
@@ -240,7 +374,43 @@ struct gltf_processor
 		std::cout << "Successfully loaded the file.\n";
 	}
 
-	std::vector<raw_node> ProcessNodes() const
+	auto GetIndexBufferFromStream( const tinygltf::Accessor& idxAccessor ) const
+	{
+		HP_ASSERT( TINYGLTF_TYPE_SCALAR == idxAccessor.type );
+
+		gltf_raw_attr_stream rawIdxStream = GetRawAttributeStream( idxAccessor );
+
+		HP_ASSERT( ( std::size( rawIdxStream ) % 3 ) == 0 );
+
+		std::vector<u32> normalized( std::size( rawIdxStream ) );
+
+		auto CasterLambda = [] ( auto v ) { return ( u32 ) v; }; 
+
+		switch( idxAccessor.componentType )
+		{
+		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+		{
+			gltf_typed_attr_stream<u8> typedIdxStream = { rawIdxStream };
+			std::ranges::copy( typedIdxStream | std::views::transform( CasterLambda ), std::begin( normalized ) );
+			break;
+		}
+		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+		{
+			gltf_typed_attr_stream<u16> typedIdxStream = { rawIdxStream };
+			std::ranges::copy( typedIdxStream | std::views::transform( CasterLambda ), std::begin( normalized ) );
+			break;
+		}
+		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
+		{
+			gltf_typed_attr_stream<u32> typedIdxStream = { rawIdxStream };
+			std::ranges::copy( typedIdxStream, std::begin( normalized ) );
+			break;
+		}
+		}
+		return normalized;
+	}
+
+	auto ProcessNodes() const
 	{
 		const std::vector<tinygltf::Node>& nodes = model.nodes;
 
@@ -287,7 +457,7 @@ struct gltf_processor
 		return flatNodes;
 	}
 
-	std::vector<raw_mesh> ProcessMeshes() const
+	auto ProcessMeshes() const
 	{
 		u64 meshPrimitiveCount = 0;
 		for( const tinygltf::Mesh& m : model.meshes )
@@ -339,195 +509,123 @@ struct gltf_processor
 		return meshesOut;
 	}
 
-	//std::vector<sampler_config> ProcessSamplers() const
-	//{
-	//	std::vector<sampler_config> samplersOut;
-	//	samplersOut.reserve( std::size( model.samplers ) );
-	//	for( const tinygltf::Sampler& sampler : model.samplers )
-	//	{
-	//		sampler_config samplerConfig = {
-	//			.filterModeS = GltfFilterToFlags( sampler.minFilter ),
-	//			.filterModeT = GltfFilterToFlags( sampler.magFilter ),
-	//			.wrapModeS = GltfWrapToFlags( sampler.wrapS ),
-	//			.wrapModeT = GltfWrapToFlags( sampler.wrapT )
-	//		};
-	//		samplersOut.push_back( samplerConfig );
-	//	}
-	//	if( std::size( model.samplers ) == 0 )
-	//	{
-	//		samplersOut.push_back( DEFAULT_SAMPLER );
-	//	}
-	//
-	//	return samplersOut;
-	//}
+	auto ProcessSamplers() const
+	{
+		std::vector<sampler_config> samplersOut;
+		samplersOut.reserve( std::size( model.samplers ) );
+		for( const tinygltf::Sampler& sampler : model.samplers )
+		{
+			sampler_config samplerConfig = {
+				.filterModeS = GltfFilterToFlags( sampler.minFilter ),
+				.filterModeT = GltfFilterToFlags( sampler.magFilter ),
+				.wrapModeS = GltfWrapToFlags( sampler.wrapS ),
+				.wrapModeT = GltfWrapToFlags( sampler.wrapT )
+			};
+			samplersOut.push_back( samplerConfig );
+		}
+		if( std::size( model.samplers ) == 0 )
+		{
+			samplersOut.push_back( DEFAULT_SAMPLER );
+		}
+	
+		return samplersOut;
+	}
 
-	//std::vector<material_info> ProcessMaterials() const
-	//{
-	//	std::vector<material_info> materialsOut;
-	//	materialsOut.reserve( std::size( model.materials ) );
-	//	for( const tinygltf::Material& material : model.materials )
-	//	{
-	//		const tinygltf::PbrMetallicRoughness& pbrInfo = material.pbrMetallicRoughness;
-	//
-	//		material_info metadata = {
-	//			.baseColFactor = {
-	//				( float ) pbrInfo.baseColorFactor[ 0 ],
-	//				( float ) pbrInfo.baseColorFactor[ 1 ],
-	//				( float ) pbrInfo.baseColorFactor[ 2 ],
-	//				( float ) pbrInfo.baseColorFactor[ 3 ]
-	//		},
-	//			.metallicFactor = ( float ) pbrInfo.metallicFactor,
-	//			.roughnessFactor = ( float ) pbrInfo.roughnessFactor,
-	//			.alphaCutoff = ( float ) material.alphaCutoff,
-	//			.emissiveFactor = {
-	//				( float ) material.emissiveFactor[ 0 ],
-	//				( float ) material.emissiveFactor[ 1 ],
-	//				( float ) material.emissiveFactor[ 2 ]
-	//		},
-	//			.alphaMode = GltfAlphaModeToEnum( material.alphaMode )
-	//		};
-	//
-	//		ankerl::unordered_dense::set<i32> samplers;
-	//		const gltf_texture normalTex = ProcessTexture( material.normalTexture );
-	//		samplers.insert( normalTex.samplerIdx );
-	//		metadata.normalIdx = normalTex.imageIdx;
-	//
-	//		const gltf_texture pbrBaseCol = ProcessTexture( pbrInfo.baseColorTexture );
-	//		samplers.insert( pbrBaseCol.samplerIdx );
-	//		metadata.baseColorIdx = pbrBaseCol.imageIdx;
-	//
-	//		const gltf_texture metallicRoughness = ProcessTexture( pbrInfo.metallicRoughnessTexture );
-	//		samplers.insert( metallicRoughness.samplerIdx );
-	//		metadata.metallicRoughnessIdx = metallicRoughness.imageIdx;
-	//
-	//		const gltf_texture occlusionTex = ProcessTexture( material.occlusionTexture );
-	//		samplers.insert( occlusionTex.samplerIdx );
-	//		metadata.occlusionIdx = occlusionTex.imageIdx;
-	//
-	//		const gltf_texture emissiveTex = ProcessTexture( material.emissiveTexture );
-	//		samplers.insert( emissiveTex.samplerIdx );
-	//		metadata.emissiveIdx = emissiveTex.imageIdx;
-	//
-	//		// NOTE: we will have -1 and possibly others so at most size 2
-	//		HP_ASSERT( std::size( samplers ) <= 2 );
-	//
-	//		auto it = std::ranges::find_if( samplers,
-	//										[]( i32 x ){ return x != -1; });
-	//		metadata.samplerIdx = ( it != std::cend( samplers ) ) ? *it : -1;
-	//
-	//		materialsOut.emplace_back( metadata );
-	//	}
-	//
-	//	return materialsOut;
-	//}
+	auto ProcessMaterials() const
+	{
+		std::vector<material_info> materialsOut;
+		materialsOut.reserve( std::size( model.materials ) );
 
-	//std::vector<gltf_image> ProcessImages() const
-	//{
-	//	std::vector<gltf_image> imgOut;
-	//	imgOut.reserve( std::size( model.images ) );
-	//	for( const tinygltf::Image& img : model.images )
-	//	{
-	//		HP_ASSERT( std::size( img.image ) );
-	//		imgOut.push_back( {
-	//			.data = std::span<const u8>{ std::data( img.image ), std::size( img.image ) },
-	//			.metadata = GetGltfTextureMetadata( img )
-	//						  } );
-	//	}
-	//
-	//	return imgOut;
-	//}
+		for( const tinygltf::Material& material : model.materials )
+		{
+			const tinygltf::PbrMetallicRoughness& pbrInfo = material.pbrMetallicRoughness;
+	
+			material_info metadata = {
+				.baseColFactor = {
+					( float ) pbrInfo.baseColorFactor[ 0 ],
+					( float ) pbrInfo.baseColorFactor[ 1 ],
+					( float ) pbrInfo.baseColorFactor[ 2 ],
+					( float ) pbrInfo.baseColorFactor[ 3 ]
+			    },
+				.metallicFactor = ( float ) pbrInfo.metallicFactor,
+				.roughnessFactor = ( float ) pbrInfo.roughnessFactor,
+				.alphaCutoff = ( float ) material.alphaCutoff,
+				.emissiveFactor = {
+					( float ) material.emissiveFactor[ 0 ],
+					( float ) material.emissiveFactor[ 1 ],
+					( float ) material.emissiveFactor[ 2 ]
+			    },
+				.alphaMode = GltfAlphaModeToEnum( material.alphaMode )
+			};
+
+			ankerl::unordered_dense::set<i32> samplers;
+			{
+				const gltf_texture pbrBaseCol = ProcessTexture( pbrInfo.baseColorTexture );
+				metadata.baseColorIdx = pbrBaseCol.imageIdx;
+				samplers.insert( pbrBaseCol.samplerIdx );
+
+				const gltf_texture normalTex = ProcessTexture( material.normalTexture );
+				metadata.normalIdx = normalTex.imageIdx;
+				samplers.insert( normalTex.samplerIdx );
+
+				const gltf_texture metallicRoughness = ProcessTexture( pbrInfo.metallicRoughnessTexture );
+				metadata.metallicRoughnessIdx = metallicRoughness.imageIdx;
+				samplers.insert( metallicRoughness.samplerIdx );
+
+				const gltf_texture occlusionTex = ProcessTexture( material.occlusionTexture );
+				metadata.occlusionIdx = occlusionTex.imageIdx;
+				samplers.insert( occlusionTex.samplerIdx );
+				// NOTE: disallow occlusion for now, it must be packed with MR in a future release
+				HP_ASSERT( decltype( metadata.occlusionIdx )( -1 ) == metadata.occlusionIdx );
+
+				const gltf_texture emissiveTex = ProcessTexture( material.emissiveTexture );
+				metadata.emissiveIdx = emissiveTex.imageIdx;
+				samplers.insert( emissiveTex.samplerIdx );
+			}
+			
+			// NOTE: will enforce all textures in a material to use the same sampler, 
+			// if there's none, we'll use the default one
+
+			// NOTE: will have -1/DEFAULT and possibly other samplers, so at most size 2
+			HP_ASSERT( std::size( samplers ) <= 2 );
+			auto it = std::ranges::find_if( samplers, []( i32 x ){ return x != -1; });
+			metadata.samplerIdx = ( it != std::cend( samplers ) ) ? *it : -1;
+	
+			materialsOut.emplace_back( metadata );
+		}
+	
+		return materialsOut;
+	}
+
+	std::vector<raw_image_view> ProcessImages() const
+	{
+		std::vector<raw_image_view> imgOut;
+		imgOut.reserve( std::size( model.images ) );
+		for( const tinygltf::Image& img : model.images )
+		{
+			HP_ASSERT( std::size( img.image ) );
+			imgOut.push_back( {
+				.data = std::span<const u8>{ std::data( img.image ), std::size( img.image ) },
+				.metadata = GetGltfTextureMetadata( img )
+			} );
+		}
+	
+		return imgOut;
+	}
 
 	template<TinyGltfTextureInfoConcept TexInfo>
 	inline gltf_texture ProcessTexture( const TexInfo& texInfo ) const
 	{
-		gltf_texture texOut = {};
-		if( -1 != texInfo.index )
-		{
-			// NOTE: bc we use TEXCOORD_0
-			HP_ASSERT( 0 == texInfo.texCoord );
-			const tinygltf::Texture& tex = model.textures[ texInfo.index ];
-			texOut = {
-				.imageIdx = tex.source,
-				.samplerIdx = tex.sampler
-			};
-		}
+		if( INVALID_IDX == texInfo.index ) return {};
 
-		return texOut;
-	}
-	// UTILS:
-	static inline packed_trs GetTrsFromNode( const tinygltf::Node& node )
-	{
-		using namespace DirectX;
-
-		XMVECTOR xmT = XMVectorSet( 0, 0, 0, 0 );
-		XMVECTOR xmR = XMVectorSet( 0, 0, 0, 1 );
-		XMVECTOR xmS = XMVectorSet( 1, 1, 1, 0 );
-		if( std::size( node.matrix ) == 16 )
-		{
-			XMMATRIX m = GetMatrix( node.matrix );
-			if( !XMMatrixDecompose( &xmS, &xmR, &xmT, m ) )
-			{
-				xmT = XMVectorSet( 0, 0, 0, 0 );
-				xmR = XMVectorSet( 0, 0, 0, 1 );
-				xmS = XMVectorSet( 1, 1, 1, 0 );
-			}
-
-		}
-		else
-		{
-			if( std::size( node.translation ) == 3 )
-			{
-				xmT = XMVectorSet(
-					(float)node.translation[0],
-					(float)node.translation[1],
-					(float)node.translation[2],
-					0.0f
-				);
-			}
-			if( std::size( node.rotation ) == 4 )
-			{
-				xmR = XMVectorSet(
-					(float)node.rotation[0],
-					(float)node.rotation[1],
-					(float)node.rotation[2],
-					(float)node.rotation[3]
-				);
-			}
-			if( std::size( node.scale ) == 3 )
-			{
-				xmS = XMVectorSet(
-					(float)node.scale[0],
-					(float)node.scale[1],
-					(float)node.scale[2],
-					0.0f
-				);
-			}
-		}
-
-		float3 t;
-		float4 r;
-		float3 s;
-
-		XMStoreFloat3( &t, xmT );
-		XMStoreFloat4( &r, xmR );
-		XMStoreFloat3( &s, xmS );
-		return { .t = t, .r = r, .s = s };
-	}
-	// NOTE: gltf matrices are col maj, right-handed
-	static inline DirectX::XMMATRIX GetMatrix( const std::vector<double>& mIn )
-	{
-		using namespace DirectX;
-		XMMATRIX m = XMMatrixSet(
-			( float ) mIn[ 0 ], ( float ) mIn[ 1 ], ( float ) mIn[ 2 ], ( float ) mIn[ 3 ],
-			( float ) mIn[ 4 ], ( float ) mIn[ 5 ], ( float ) mIn[ 6 ], ( float ) mIn[ 7 ],
-			( float ) mIn[ 8 ], ( float ) mIn[ 9 ], ( float ) mIn[ 10 ], ( float ) mIn[ 11 ],
-			( float ) mIn[ 12 ], ( float ) mIn[ 13 ], ( float ) mIn[ 14 ], ( float ) mIn[ 15 ]
-		);
-
-		return XMMatrixTranspose( m );
+		// NOTE: bc we use TEXCOORD_0
+		HP_ASSERT( 0 == texInfo.texCoord );
+		const tinygltf::Texture& tex = model.textures[ texInfo.index ];
+		return { .imageIdx = tex.source, .samplerIdx = tex.sampler };
 	}
 
-	inline const tinygltf::Accessor* GetAccessorByName( std::string_view name, const tinygltf::Primitive& primMesh ) const
+	inline const tinygltf::Accessor* 
+	GetAccessorByName( std::string_view name, const tinygltf::Primitive& primMesh ) const
 	{
 		const auto it = primMesh.attributes.find( std::string{ name } );
 		if( std::cend( primMesh.attributes ) == it ) return nullptr;
@@ -568,112 +666,6 @@ struct gltf_processor
 		//}
 
 		return { streamView, accessor.count, numComponents, componentSizeInBytes, strideInBytes };
-	}
-
-	auto GetIndexBufferFromStream( const tinygltf::Accessor& idxAccessor ) const
-	{
-		HP_ASSERT( TINYGLTF_TYPE_SCALAR == idxAccessor.type );
-
-		gltf_raw_attr_stream rawIdxStream = GetRawAttributeStream( idxAccessor );
-
-		HP_ASSERT( ( std::size( rawIdxStream ) % 3 ) == 0 );
-
-		std::vector<u32> normalized( std::size( rawIdxStream ) );
-
-		auto CasterLambda = [] ( auto v ) { return ( u32 ) v; }; 
-
-		switch( idxAccessor.componentType )
-		{
-		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
-		{
-			gltf_typed_attr_stream<u8> typedIdxStream = { rawIdxStream };
-			std::ranges::copy( typedIdxStream | std::views::transform( CasterLambda ), std::begin( normalized ) );
-			break;
-		}
-		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
-		{
-			gltf_typed_attr_stream<u16> typedIdxStream = { rawIdxStream };
-			std::ranges::copy( typedIdxStream | std::views::transform( CasterLambda ), std::begin( normalized ) );
-			break;
-		}
-		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
-		{
-			gltf_typed_attr_stream<u32> typedIdxStream = { rawIdxStream };
-			std::ranges::copy( typedIdxStream, std::begin( normalized ) );
-			break;
-		}
-		}
-		return normalized;
-	}
-
-	static inline alpha_mode GltfAlphaModeToEnum( std::string_view gltfAlphaMode )
-	{
-		if( gltfAlphaMode == "MASK" )  return ALPHA_MODE_MASK;
-		if( gltfAlphaMode == "BLEND" ) return ALPHA_MODE_BLEND;
-		return ALPHA_MODE_OPAQUE;
-	}
-
-	static inline sampler_filter_mode_flags GltfFilterToFlags( int gltfFilter )
-	{
-		switch( gltfFilter )
-		{
-		case TINYGLTF_TEXTURE_FILTER_NEAREST:                 return FILTER_NEAREST;
-		case TINYGLTF_TEXTURE_FILTER_LINEAR:                  return FILTER_LINEAR;
-		case TINYGLTF_TEXTURE_FILTER_NEAREST_MIPMAP_NEAREST: return FILTER_NEAREST_MIPMAP_NEAREST;
-		case TINYGLTF_TEXTURE_FILTER_LINEAR_MIPMAP_NEAREST:  return FILTER_LINEAR_MIPMAP_NEAREST;
-		case TINYGLTF_TEXTURE_FILTER_NEAREST_MIPMAP_LINEAR:  return FILTER_NEAREST_MIPMAP_LINEAR;
-		case TINYGLTF_TEXTURE_FILTER_LINEAR_MIPMAP_LINEAR:   return FILTER_LINEAR_MIPMAP_LINEAR;
-		default:                                             return FILTER_LINEAR;
-		}
-	}
-
-	static inline sampler_wrap_mode_flags GltfWrapToFlags( int gltfWrap )
-	{
-		switch( gltfWrap )
-		{
-		case TINYGLTF_TEXTURE_WRAP_CLAMP_TO_EDGE:   return WRAP_CLAMP_TO_EDGE;
-		case TINYGLTF_TEXTURE_WRAP_MIRRORED_REPEAT: return WRAP_MIRRORED_REPEAT;
-		case TINYGLTF_TEXTURE_WRAP_REPEAT:          return WRAP_REPEAT;
-		default:                                    return WRAP_CLAMP_TO_EDGE;
-		}
-	}
-
-	static inline gltf_image_metadata GetGltfTextureMetadata( const tinygltf::Image& img )
-	{
-		gltf_image_metadata out{
-			.width = img.width,
-			.height = img.height,
-			//.component = ,
-			//.bits = ,
-			//.pixelType =
-		};
-
-		switch( img.component )
-		{
-		case 1: out.component = gltf_img_components::R; break;
-		case 2: out.component = gltf_img_components::RG; break;
-		case 3: out.component = gltf_img_components::RGB; break;
-		case 4: out.component = gltf_img_components::RGBA; break;
-		default: out.component = gltf_img_components::UNKNOWN;
-		}
-
-		switch( img.bits )
-		{
-		case 8:  out.bits = gltf_img_bit_depth::B8; break;
-		case 16: out.bits = gltf_img_bit_depth::B16; break;
-		case 32: out.bits = gltf_img_bit_depth::B32; break;
-		default: out.bits = gltf_img_bit_depth::UNKNOWN;
-		}
-
-		switch( img.pixel_type )
-		{
-		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:  out.pixelType = gltf_img_pixel_type::UBYTE; break;
-		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: out.pixelType = gltf_img_pixel_type::USHORT; break;
-		case TINYGLTF_COMPONENT_TYPE_FLOAT:          out.pixelType = gltf_img_pixel_type::FLOAT32; break;
-		default: out.pixelType = gltf_img_pixel_type::UNKNOWN;
-		}
-
-		return out;
 	}
 };
 
@@ -930,6 +922,40 @@ inline auto MeshletAabbView( const std::ranges::forward_range auto& meshlets )
 		[] ( const rt_meshlet& m ) { return aabb_t<float3>{ .min = m.aabbMin, .max = m.aabbMax }; } );
 };
 
+auto PrepareBcnCompressionJobs( std::span<const material_info> materials, std::span<const raw_image_view> imageViews )
+{
+	std::vector<bcn_compression_job> jobs;
+
+	ankerl::unordered_dense::set<u32> visitedImages;
+
+	auto ProcessImageView = [&] ( u16 idx, bc_format_t fmt )
+	{
+		if( !IsIndexValid( idx ) ) return;
+		if( visitedImages.find( idx ) != std::cend( visitedImages ) ) return;
+
+		visitedImages.emplace( idx );
+
+		const raw_image_view& imgView = imageViews[ idx ];
+		jobs.push_back( bcn_compression_job{
+			.rgba8 = imgView.data, 
+			.width = imgView.metadata.width, 
+			.height = imgView.metadata.height, 
+			.format = fmt
+		} );
+	};
+	for( const material_info& material : materials )
+	{
+		ProcessImageView( material.baseColorIdx, bc_format_t::BC7_RGBA );
+		ProcessImageView( material.normalIdx, bc_format_t::BC5_RG );
+		ProcessImageView( material.metallicRoughnessIdx, bc_format_t::BC7_RGBA );
+		//ProcessImageView( material.occlusionIdx, bc_format_t::BC7_RGBA );
+		// NOTE: currently not suporting ambient occlusion which must be packed into MR
+		HP_ASSERT( !IsIndexValid( material.occlusionIdx ) );
+		ProcessImageView( material.emissiveIdx, bc_format_t::BC7_RGBA );
+	}
+
+	return jobs;
+}
 int main()
 {
 	const std::string gltfFilePath = "D:/3d models/nightclub_futuristic_pub_ambience_asset.glb";
@@ -937,9 +963,15 @@ int main()
 
 	gltf_processor gltf = { gltfFilePath };
 
-	// TODO: ensure we keep the same indexing !!!!
+	// TODO: ensure we keep the same indexing as tinygltf provides !!!!
 	std::vector<raw_node> rawNodes = gltf.ProcessNodes();
 	std::vector<raw_mesh> rawMeshes = gltf.ProcessMeshes();
+	std::vector<sampler_config> sampler = gltf.ProcessSamplers();
+	std::vector<material_info> materials = gltf.ProcessMaterials();
+	std::vector<raw_image_view> imageViews = gltf.ProcessImages();
+
+	std::vector<bcn_compression_job> bcnCmpJobs = PrepareBcnCompressionJobs( materials, imageViews );
+	std::vector<bcn_compression_result> bcnRaw = CompressRGBA8ToBCn( bcnCmpJobs, std::size( bcnCmpJobs ) / 4 );
 
 	world_data worldData = {};
 
@@ -1007,5 +1039,7 @@ int main()
 
 	bvh_output tlasOutput = bvhBuilder.BuildBvhOverPrimitives( tlasAabbs );
 	worldData.globalTlasBuffer = std::move( tlasOutput.gpuNodes );
+
+	return 0;
 }
 

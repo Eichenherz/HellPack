@@ -72,6 +72,12 @@
     <ClCompile Include="3rdParty\MikkTSpace\mikktspace.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="3rdParty\bc7enc_rdo\bc7enc.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="3rdParty\bc7enc_rdo\rgbcx.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="core_types.h">
@@ -92,10 +98,16 @@
     <ClInclude Include="hp_bvh.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="hp_types.h">
+    <ClInclude Include="hp_mesh.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="mikkt_space.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="hp_material.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="hp_bcn_compression.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

@@ -10,3 +10,9 @@
 [submodule "3rdParty/madmannbvh"]
 	path = 3rdParty/madmannbvh
 	url = https://github.com/madmann91/bvh.git
+[submodule "3rdParty/unordered_dense"]
+	path = 3rdParty/unordered_dense
+	url = https://github.com/martinus/unordered_dense.git
+[submodule "3rdParty/bc7enc_rdo"]
+	path = 3rdParty/bc7enc_rdo
+	url = https://github.com/Eichenherz/bc7enc_rdo.git

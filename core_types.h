@@ -19,6 +19,11 @@ struct range64
 	u64 count : 32;
 };
 
+constexpr i32 INVALID_IDX = -1;
+
+template<typename T>
+inline bool IsIndexValid( T idx ) { return T( INVALID_IDX ) != idx; }
+
 template<typename T>
 concept Number32BitsMax = ( sizeof( T ) <= 4 );
 
