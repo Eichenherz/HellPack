@@ -2,11 +2,14 @@
 #define __HP_MESH_H__
 
 #include "core_types.h"
-#include "hp_math.h"
 
 #include <bit>
 #include <string>
 #include <vector>
+
+struct float2;
+struct float3;
+struct float4;
 
 struct alignas( 16 ) packed_trs
 {
@@ -87,23 +90,8 @@ constexpr u32 BVH_INVALID_REF = 0xffffffffu;
 constexpr u32 BVH2_LEAF_BIT   = 0x80000000u;
 constexpr u32 BVH2_NODE_MASK  = 0x7fffffffu;
 
-// NOTE: example-leaf: base = bits0..28 (index into prim_ids[]) countMinus1 = bits29..30 (0..3 => count 1..4)
-constexpr u32 MIN_LEAF_PRIM_COUNT = 1;
-constexpr u32 MAX_LEAF_PRIM_COUNT = 4;
-static_assert( MAX_LEAF_PRIM_COUNT >= 1 && MAX_LEAF_PRIM_COUNT <= 8 );
-
-constexpr u32 BVH2_LEAF_COUNT_BITS = std::bit_width( MAX_LEAF_PRIM_COUNT );
-constexpr u32 BVH2_LEAF_COUNT_SHIFT = 31u - BVH2_LEAF_COUNT_BITS;
-constexpr u32 BVH2_LEAF_BASE_MASK = ( 1u << BVH2_LEAF_COUNT_SHIFT ) - 1u;
-constexpr u32 BVH2_LEAF_COUNT_MASK = ( ( 1u << BVH2_LEAF_COUNT_BITS ) - 1u ) << BVH2_LEAF_COUNT_SHIFT;
-
 inline bool  Bvh2IsLeaf( bvh2_node_ref32 ref ) { return ( ref & BVH2_LEAF_BIT ) != 0u; }
 inline u32	 Bvh2NodeIdx( bvh2_node_ref32 ref ) { return ( ref & BVH2_NODE_MASK ); }
-inline u32	 Bvh2LeafBase( bvh2_node_ref32 ref ) { return ( ref & BVH2_LEAF_BASE_MASK ); }
-inline u32	 Bvh2LeafCount( bvh2_node_ref32 ref ) 
-{ 
-	return ( ( ref & BVH2_LEAF_COUNT_MASK ) >> BVH2_LEAF_COUNT_SHIFT ) + 1u; 
-}
 inline bool  Bvh2RefIsInvalid( bvh2_node_ref32 ref )
 {
 	return BVH_INVALID_REF == ref;
@@ -119,6 +107,8 @@ struct alignas( 64 ) gpu_bvh2_node
 struct instance
 {
 	packed_trs toWorld;
+	float3 aabbMin;
+	float3 aabbMax;
 	bvh2_node_ref32 clasBvhRoot;
 	u32 clasNodeCount;
 	u32 baseMeshletOffset;

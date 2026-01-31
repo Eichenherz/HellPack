@@ -27,10 +27,12 @@ inline float EncodeTanToAngle( float3 n, float3 t )
 {
 	using namespace DirectX;
 
-	// NOTE: inspired by Doom Eternal
-	float3 tanRef = ( std::abs( n.x ) > std::abs( n.z ) ) ? float3{ -n.y, n.x, 0.0f } : float3{ 0.0f, -n.z, n.y };
+	XMFLOAT3 tan = ToDX( t );
 
-	float tanRefAngle = XMVectorGetX( XMVector3AngleBetweenVectors( XMLoadFloat3( &t ), XMLoadFloat3( &tanRef ) ) );
+	// NOTE: inspired by Doom Eternal
+	XMFLOAT3 tanRef = ( std::abs( n.x ) > std::abs( n.z ) ) ? XMFLOAT3{ -n.y, n.x, 0.0f } : XMFLOAT3{ 0.0f, -n.z, n.y };
+
+	float tanRefAngle = XMVectorGetX( XMVector3AngleBetweenVectors( XMLoadFloat3( &tan ), XMLoadFloat3( &tanRef ) ) );
 	return XMScalarModAngle( tanRefAngle ) * XM_1DIVPI;
 }
 

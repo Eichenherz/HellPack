@@ -3,6 +3,7 @@
 
 #include "core_types.h"
 #include "hp_mesh.h"
+#include "hp_math.h"
 #include "hp_error.h"
 
 #include <mikktspace.h>

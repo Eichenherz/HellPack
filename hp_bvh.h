@@ -13,14 +13,14 @@
 
 #include <optional>
 
-inline bvh2_node_ref32   MakeBvh2NodeRef( u32 nodeIndex ) { return nodeIndex & BVH2_NODE_MASK; }
-inline bvh2_node_ref32   MakeBvh2LeafRef( u32 basePrimIds, u32 count )
+inline bvh2_node_ref32   MakeBvh2NodeRef( u32 nodeIndex )
 {
-	assert( count >= 1 && count <= MAX_LEAF_PRIM_COUNT );
-
-	u32 c = ( count - 1u ) & ( ( 1u << BVH2_LEAF_COUNT_BITS ) - 1u );
-
-	return BVH2_LEAF_BIT | ( basePrimIds & BVH2_LEAF_BASE_MASK ) | ( c << BVH2_LEAF_COUNT_SHIFT );
+	assert( nodeIndex <= BVH2_NODE_MASK );
+	return nodeIndex & BVH2_NODE_MASK;
+}
+__forceinline bvh2_node_ref32   MakeBvh2LeafRef( u32 basePrimIdx )
+{
+	return BVH2_LEAF_BIT | MakeBvh2NodeRef( basePrimIdx );
 }
 
 using scalar  = float;
@@ -41,6 +41,9 @@ inline aabb_t<float3> GetAabb( bbox_t in )
 	return { .min = ToFloat3( in.min ), .max = ToFloat3( in.max ) };
 }
 
+// TODO: config
+constexpr u32 MIN_LEAF_PRIM_COUNT = 1;
+constexpr u32 MAX_LEAF_PRIM_COUNT = 1;
 
 struct bvh_output
 {
@@ -84,7 +87,8 @@ struct bvh_builder
 
 		if( c.index.is_leaf() )
 		{
-			return MakeBvh2LeafRef( c.index.first_id(), c.index.prim_count() );
+			HP_ASSERT( c.index.prim_count() == MIN_LEAF_PRIM_COUNT );
+			return MakeBvh2LeafRef( c.index.first_id() );
 		}
 
 		u32 first = c.index.first_id();

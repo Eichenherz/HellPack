@@ -16,8 +16,11 @@ namespace fs = std::filesystem;
 
 #include "core_types.h"
 #include "hp_error.h"
+
+// NOTE/TODO: float types are fwd def in mesh to be shared ! must use an internal folder or smth for math
 #include "hp_math.h"
 #include "hp_mesh.h"
+
 #include "hp_material.h"
 #include "hp_bvh.h"
 #include "hp_encoding.h"
@@ -29,20 +32,25 @@ inline packed_trs XM_CALLCONV XMComposePackedTRS( packed_trs a, packed_trs b )
 {
 	using namespace DirectX;
 
-	XMVECTOR aT = XMLoadFloat3( &a.t );
-	XMVECTOR aR = XMLoadFloat4( &a.r );
-	XMVECTOR aS = XMLoadFloat3( &a.s );
+	XMFLOAT3 aT = ToDX( a.t );
+	XMFLOAT4 aR = ToDX( a.r );
+	XMFLOAT3 aS = ToDX( a.s );
+	  
+	XMFLOAT3 bT = ToDX( b.t );
+	XMFLOAT4 bR = ToDX( b.r );
+	XMFLOAT3 bS = ToDX( b.s );
 
-	XMVECTOR bT = XMLoadFloat3( &b.t );
-	XMVECTOR bR = XMLoadFloat4( &b.r );
-	XMVECTOR bS = XMLoadFloat3( &b.s );
+	XMVECTOR xmA_T = XMLoadFloat3( &aT );
+	XMVECTOR xmA_R = XMLoadFloat4( &aR );
+	XMVECTOR xmA_S = XMLoadFloat3( &aS );
 
-	float3 outT;
-	XMStoreFloat3( &outT, XMVectorAdd( aT, bT ) );
-	float4 outR;
-	XMStoreFloat4( &outR, XMQuaternionMultiply( aR, bR ) ); // World = Parent * Local
-	float3 outS;
-	XMStoreFloat3( &outS, XMVectorMultiply( aS, bS ) );
+	XMVECTOR xmB_T = XMLoadFloat3( &bT );
+	XMVECTOR xmB_R = XMLoadFloat4( &bR );
+	XMVECTOR xmB_S = XMLoadFloat3( &bS );
+
+	float3 outT = DX_XMStoreFloat3( XMVectorAdd( xmA_T, xmB_T ) );
+	float4 outR = DX_XMStoreFloat4( XMQuaternionMultiply( xmA_R, xmB_R ) ); // World = Parent * Local
+	float3 outS = DX_XMStoreFloat3( XMVectorAdd( xmA_S, xmB_S ) );
 
 	return { .t = outT, .r = outR, .s = outS };
 }
@@ -278,14 +286,11 @@ inline packed_trs GetTrsFromNode( const tinygltf::Node& node )
 		}
 	}
 
-	float3 t;
-	float4 r;
-	float3 s;
-
-	XMStoreFloat3( &t, xmT );
-	XMStoreFloat4( &r, xmR );
-	XMStoreFloat3( &s, xmS );
-	return { .t = t, .r = r, .s = s };
+	return { 
+		.t = DX_XMStoreFloat3( xmT ), 
+		.r = DX_XMStoreFloat4( xmR ), 
+		.s = DX_XMStoreFloat3( xmS ) 
+	};
 }
 
 inline alpha_mode GltfAlphaModeToEnum( std::string_view gltfAlphaMode )
@@ -935,6 +940,15 @@ inline auto MeshletAabbView( const std::ranges::forward_range auto& meshlets )
 		[] ( const rt_meshlet& m ) { return aabb_t<float3>{ .min = m.aabbMin, .max = m.aabbMax }; } );
 };
 
+inline auto InstanceTlasAabbView( const std::ranges::forward_range auto& instances )
+{
+	return instances | std::views::transform( 
+		[] ( const instance& i ) 
+		{ 
+			return TransformAABB( i.aabbMin, i.aabbMax, i.toWorld.t, i.toWorld.r, i.toWorld.s );
+		} );
+};
+
 struct texture_compression_batch
 {
 	ankerl::unordered_dense::map<u32,u32> imgViewToTexMap;
@@ -1086,8 +1100,8 @@ int main()
 
 	bvh_builder bvhBuilder = {};
 
-	std::vector<aabb_t<float3>> tlasAabbs;
-	tlasAabbs.reserve( std::size( rawMeshes ) );
+	std::vector<instance> instances;
+	instances.reserve( std::size( rawNodes ) );
 
 	for( const raw_node& n : rawNodes )
 	{
@@ -1103,24 +1117,18 @@ int main()
 		HP_ASSERT( std::size( packedMeshlets ) != 0 );
 
 		auto meshletAabbView = MeshletAabbView( packedMeshlets );
-		// NOTE: if we don't have at least 3 leaves worth of work we can skip the BVH
-		const bool buildBvhThresholdReached = std::size( meshletAabbView ) <= 2 * MAX_LEAF_PRIM_COUNT;
-		if( buildBvhThresholdReached )
+		// NOTE: if we don't have at least 2 leaves worth of work we can skip the BVH
+		const bool buildBvhThresholdReached = std::size( meshletAabbView ) > 1;
+		if( !buildBvhThresholdReached )
 		{
 			auto[ baseMeshletOffset, meshletCount ] = worldData.AppendMeshlets( packedMeshlets );
 
-			aabb_t<float3> tlasAabb = MergeAabbs( meshletAabbView );
-			aabb_t<float3> wordlTlasAabb = TransformAABB(
-				&tlasAabb.min,
-				&tlasAabb.max,
-				&n.toWorld.t,
-				&n.toWorld.r,
-				&n.toWorld.s
-			);
-			tlasAabbs.push_back( wordlTlasAabb );
+			aabb_t<float3> aabb = MergeAabbs( meshletAabbView );
 
-			worldData.instances.push_back( {
+			instances.push_back( {
 				.toWorld = n.toWorld,
+				.aabbMin = aabb.min,
+				.aabbMax = aabb.max,
 				.clasBvhRoot = BVH_INVALID_REF,
 				.clasNodeCount = 0,
 				.baseMeshletOffset = ( u32 ) baseMeshletOffset,
@@ -1130,28 +1138,20 @@ int main()
 		}
 		else
 		{
-			bvh_output clasOutput = bvhBuilder.BuildBvhOverPrimitives( meshletAabbView );
+			bvh_output bvh = bvhBuilder.BuildBvhOverPrimitives( meshletAabbView );
 
 			const u32 bvhRootOffset = ( u32 ) std::size( worldData.globalClasBuffer );
-			const u32 clasNodeCount = ( u32 ) std::size( clasOutput.gpuNodes );
+			const u32 clasNodeCount = ( u32 ) std::size( bvh.gpuNodes );
 			worldData.globalClasBuffer.reserve( bvhRootOffset + clasNodeCount ); // NOTE: just convenice to not type size( ... )
-			std::ranges::copy( clasOutput.gpuNodes, std::back_inserter( worldData.globalClasBuffer ) );
+			std::ranges::copy( bvh.gpuNodes, std::back_inserter( worldData.globalClasBuffer ) );
 
-			auto permutedView = PermutedView( packedMeshlets, clasOutput.primitiveIndices );
+			auto permutedView = PermutedView( packedMeshlets, bvh.primitiveIndices );
 			auto[ baseMeshletOffset, meshletCount ] = worldData.AppendMeshlets( permutedView );
 
-			aabb_t<float3> wordlTlasAabb = TransformAABB(
-				&clasOutput.topLevelAabb.min,
-				&clasOutput.topLevelAabb.max,
-				&n.toWorld.t,
-				&n.toWorld.r,
-				&n.toWorld.s
-			);
-
-			tlasAabbs.push_back( wordlTlasAabb );
-
-			worldData.instances.push_back( {
+			instances.push_back( {
 				.toWorld = n.toWorld,
+				.aabbMin = bvh.topLevelAabb.min,
+				.aabbMax = bvh.topLevelAabb.max,
 				.clasBvhRoot = bvhRootOffset,
 				.clasNodeCount = clasNodeCount,
 				.baseMeshletOffset = ( u32 ) baseMeshletOffset,
@@ -1161,8 +1161,14 @@ int main()
 		}
 	}
 
-	bvh_output tlasOutput = bvhBuilder.BuildBvhOverPrimitives( tlasAabbs );
+	auto tlasAabbsView = InstanceTlasAabbView( instances );
+	bvh_output tlasOutput = bvhBuilder.BuildBvhOverPrimitives( tlasAabbsView );
 	worldData.globalTlasBuffer = std::move( tlasOutput.gpuNodes );
+
+	HP_ASSERT( std::size( instances ) == std::size( tlasOutput.primitiveIndices ) );
+	worldData.instances.reserve( std::size( instances ) );
+	auto permutedInstances = PermutedView( instances, tlasOutput.primitiveIndices );
+	std::ranges::copy( permutedInstances, std::back_inserter( worldData.instances ) );
 
 	std::vector<u8> blob = HellPackSerializeWorld( worldData );
 	WriteFileBinary( "D:/3d models/nightclub_futuristic_pub_ambience_asset.hllp", blob );
@@ -1189,7 +1195,6 @@ int main()
 		}
 	}
 	
-
 	//batchExec.Join();
 
 	return 0;

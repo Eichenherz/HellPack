@@ -17,17 +17,24 @@
 
 #include <cmath>
 
-using float4x4 = DirectX::XMFLOAT4X4A;
-using float3x3 = DirectX::XMFLOAT3X3;
-using float4 = DirectX::XMFLOAT4;
-using float3 = DirectX::XMFLOAT3;
-using float2 = DirectX::XMFLOAT2;
-using uint4 = DirectX::XMUINT4;
-using uint3 = DirectX::XMUINT3;
-using uint2 = DirectX::XMUINT2;
-using int4 = DirectX::XMINT4;
-using int3 = DirectX::XMINT3;
-using int2 = DirectX::XMINT2;
+struct float2 { float x, y; };
+struct float3 { float x, y, z; };
+struct float4 { float x, y, z, w; };
+
+static_assert( std::is_trivially_copyable_v<float2> );
+static_assert( std::is_trivially_copyable_v<float3> );
+static_assert( std::is_trivially_copyable_v<float4> );
+static_assert( sizeof( float2 ) == sizeof( DirectX::XMFLOAT2 ) );
+static_assert( sizeof( float3 ) == sizeof( DirectX::XMFLOAT3 ) );
+static_assert( sizeof( float4 ) == sizeof( DirectX::XMFLOAT4 ) );
+
+__forceinline DirectX::XMFLOAT2 ToDX( const float2& v ) noexcept { return std::bit_cast< DirectX::XMFLOAT2 >( v ); }
+__forceinline DirectX::XMFLOAT3 ToDX( const float3& v ) noexcept { return std::bit_cast< DirectX::XMFLOAT3 >( v ); }
+__forceinline DirectX::XMFLOAT4 ToDX( const float4& v ) noexcept { return std::bit_cast< DirectX::XMFLOAT4 >( v ); }
+
+__forceinline float2 FromDX( const DirectX::XMFLOAT2& v ) noexcept { return std::bit_cast< float2 >( v ); }
+__forceinline float3 FromDX( const DirectX::XMFLOAT3& v ) noexcept { return std::bit_cast< float3 >( v ); }
+__forceinline float4 FromDX( const DirectX::XMFLOAT4& v ) noexcept { return std::bit_cast< float4 >( v ); }
 
 struct u16x3
 {
@@ -170,32 +177,43 @@ inline aabb_t<float3> MergeAabbs( const std::ranges::forward_range auto& aabbs )
 	return MergeAabbsMultiple( aabbs );
 }
 
-inline u64 AlignUp( u64 x, u64 a ) { return ( x + ( a - 1 ) ) & ~( a - 1 ); }
-
-__forceinline auto XM_CALLCONV DX_XMStoreFloat3( DirectX::XMVECTOR v )
+__forceinline float3 XM_CALLCONV DX_XMStoreFloat3( DirectX::XMVECTOR v )
 {
-	float3 out;
+	DirectX::XMFLOAT3 out;
 	DirectX::XMStoreFloat3( &out, v );
-	return out;
+	return FromDX( out );
 }
 
-inline aabb_t<float3> XM_CALLCONV TransformAABB( 
-	const float3* min, 
-	const float3* max, 
-	const float3* t, 
-	const float4* r, 
-	const float3* s 
+__forceinline float4 XM_CALLCONV DX_XMStoreFloat4( DirectX::XMVECTOR v )
+{
+	DirectX::XMFLOAT4 out;
+	DirectX::XMStoreFloat4( &out, v );
+	return FromDX( out );
+}
+
+inline aabb_t<float3> TransformAABB( 
+	const float3& min, 
+	const float3& max, 
+	const float3& t, 
+	const float4& r, 
+	const float3& s 
 ) {
 	using namespace DirectX;
 
-	XMVECTOR xmMin = XMLoadFloat3( min );
-	XMVECTOR xmMax = XMLoadFloat3( max );
+	DirectX::XMFLOAT3 dxMin = ToDX( min );
+	DirectX::XMFLOAT3 dxMax = ToDX( max );
+	DirectX::XMFLOAT3 dxT = ToDX( t );
+	DirectX::XMFLOAT4 dxR = ToDX( r );
+	DirectX::XMFLOAT3 dxS = ToDX( s );
+
+	XMVECTOR xmMin = XMLoadFloat3( &dxMin );
+	XMVECTOR xmMax = XMLoadFloat3( &dxMax );
 
 	XMVECTOR xmCenter = XMVectorScale( XMVectorAdd( xmMax, xmMin ), 0.5f );
 	XMVECTOR xmExtent = XMVectorScale( XMVectorSubtract( xmMax, xmMin ), 0.5f );
 
 	XMMATRIX xmTRS = XMMatrixAffineTransformation(
-		XMLoadFloat3( s ), XMVectorZero(), XMLoadFloat4( r ), XMLoadFloat3( t ) );
+		XMLoadFloat3( &dxS ), XMVectorZero(), XMLoadFloat4( &dxR ), XMLoadFloat3( &dxT ) );
 
 	XMVECTOR xmNewCenter = XMVector3Transform( xmCenter, xmTRS );
 	XMVECTOR xmNewExtent = XMVector3Transform( xmExtent, xmTRS );

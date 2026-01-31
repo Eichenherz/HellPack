@@ -2,9 +2,10 @@
 #define __HP_SERIALIZATION_H__
 
 #include "core_types.h"
-#include "hp_math.h"
+#include "hp_error.h"
 
 #include <span>
+#include <algorithm>
 #include <ranges>
 
 constexpr u32 HELLPACK_VERSION = 1;
@@ -20,6 +21,14 @@ constexpr u64 HELLPACK_MAGIC =
 
 constexpr u64 GPU_BUFFER_ALIGNEMNT = 64;
 
+inline u64 AlignUp( u64 x, u64 a ) { return ( x + ( a - 1 ) ) & ~( a - 1 ); }
+
+struct byte_range_t
+{
+	u64 baseOffset;
+	u64 count;
+};
+
 template<typename T>
 struct typed_view
 {
@@ -30,7 +39,12 @@ struct typed_view
 	constexpr u32      size()  const { return count; }
 	constexpr const T* begin() const { return ptr; }
 	constexpr const T* end()   const { return ptr + count; }
-	constexpr std::span<const T> span() const { return { ptr, (u64)count }; }
+	constexpr std::span<const T> span() const { return { ptr, ( u64 ) count }; }
+	constexpr const T& operator[](u32 i) const noexcept
+	{
+		assert( i < count );
+		return ptr[ i ];
+	}
 };
 
 using byte_view = typed_view<u8>;
