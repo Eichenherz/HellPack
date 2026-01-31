@@ -172,4 +172,38 @@ inline aabb_t<float3> MergeAabbs( const std::ranges::forward_range auto& aabbs )
 
 inline u64 AlignUp( u64 x, u64 a ) { return ( x + ( a - 1 ) ) & ~( a - 1 ); }
 
+__forceinline auto XM_CALLCONV DX_XMStoreFloat3( DirectX::XMVECTOR v )
+{
+	float3 out;
+	DirectX::XMStoreFloat3( &out, v );
+	return out;
+}
+
+inline aabb_t<float3> XM_CALLCONV TransformAABB( 
+	const float3* min, 
+	const float3* max, 
+	const float3* t, 
+	const float4* r, 
+	const float3* s 
+) {
+	using namespace DirectX;
+
+	XMVECTOR xmMin = XMLoadFloat3( min );
+	XMVECTOR xmMax = XMLoadFloat3( max );
+
+	XMVECTOR xmCenter = XMVectorScale( XMVectorAdd( xmMax, xmMin ), 0.5f );
+	XMVECTOR xmExtent = XMVectorScale( XMVectorSubtract( xmMax, xmMin ), 0.5f );
+
+	XMMATRIX xmTRS = XMMatrixAffineTransformation(
+		XMLoadFloat3( s ), XMVectorZero(), XMLoadFloat4( r ), XMLoadFloat3( t ) );
+
+	XMVECTOR xmNewCenter = XMVector3Transform( xmCenter, xmTRS );
+	XMVECTOR xmNewExtent = XMVector3Transform( xmExtent, xmTRS );
+
+	XMVECTOR xmNewMin = XMVectorAdd( xmNewCenter, xmNewExtent );
+	XMVECTOR xmNewMax = XMVectorSubtract( xmNewCenter, xmNewExtent );
+
+	return { .min = DX_XMStoreFloat3( xmNewMin ), .max = DX_XMStoreFloat3( xmNewMax ) };
+}
+
 #endif // !__HP_MATH_H__

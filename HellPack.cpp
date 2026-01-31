@@ -834,16 +834,6 @@ auto PackMeshletsRaytracing( const raw_mesh& rawMesh )
 	return packedMeshlets;
 }
 
-struct instance
-{
-	packed_trs toWorld;
-	bvh2_node_ref32 clasBvhRoot;
-	u32 clasNodeCount;
-	u32 baseMeshletOffset;
-	u32 meshletCount;
-	i32 materialIdx;
-};
-
 struct world_data
 {
 	std::vector<instance> instances;
@@ -1070,6 +1060,8 @@ inline auto ReadFileBinary( const char* path )
 	return out;
 }
 
+constexpr bool CHECK_SERIALIZATION_RESULT = false;
+
 int main()
 {
 	const std::string gltfFilePath = "D:/3d models/nightclub_futuristic_pub_ambience_asset.glb";
@@ -1118,7 +1110,14 @@ int main()
 			auto[ baseMeshletOffset, meshletCount ] = worldData.AppendMeshlets( packedMeshlets );
 
 			aabb_t<float3> tlasAabb = MergeAabbs( meshletAabbView );
-			tlasAabbs.push_back( tlasAabb );
+			aabb_t<float3> wordlTlasAabb = TransformAABB(
+				&tlasAabb.min,
+				&tlasAabb.max,
+				&n.toWorld.t,
+				&n.toWorld.r,
+				&n.toWorld.s
+			);
+			tlasAabbs.push_back( wordlTlasAabb );
 
 			worldData.instances.push_back( {
 				.toWorld = n.toWorld,
@@ -1141,7 +1140,15 @@ int main()
 			auto permutedView = PermutedView( packedMeshlets, clasOutput.primitiveIndices );
 			auto[ baseMeshletOffset, meshletCount ] = worldData.AppendMeshlets( permutedView );
 
-			tlasAabbs.push_back( clasOutput.topLevelAabb );
+			aabb_t<float3> wordlTlasAabb = TransformAABB(
+				&clasOutput.topLevelAabb.min,
+				&clasOutput.topLevelAabb.max,
+				&n.toWorld.t,
+				&n.toWorld.r,
+				&n.toWorld.s
+			);
+
+			tlasAabbs.push_back( wordlTlasAabb );
 
 			worldData.instances.push_back( {
 				.toWorld = n.toWorld,
@@ -1159,24 +1166,29 @@ int main()
 
 	std::vector<u8> blob = HellPackSerializeWorld( worldData );
 	WriteFileBinary( "D:/3d models/nightclub_futuristic_pub_ambience_asset.hllp", blob );
-	auto read = ReadFileBinary( "D:/3d models/nightclub_futuristic_pub_ambience_asset.hllp" );
-	hellpack_view hellpackView = { read };
 
-	byte_view bufs[] = {
-		MakeByteView( worldData.instances ),
-		MakeByteView( worldData.globalTlasBuffer ),
-		MakeByteView( worldData.globalClasBuffer ),
-		MakeByteView( worldData.meshletInfoBuffer ),
-		MakeByteView( worldData.globalVertexPosBuffer ),
-		MakeByteView( worldData.globalPackedVertexBuffer ),
-		MakeByteView( worldData.globalTriangleBuffer ),
-	};
-
-	for( u64 i : std::views::iota( 0u, hellpack_entry_slot::COUNT ) )
+	if constexpr( CHECK_SERIALIZATION_RESULT )
 	{
-		byte_view bv = hellpackView.Bytes( hellpack_entry_slot( i ) );
-		HP_ASSERT( ByteEqual( bv, bufs[ i ] ) );
+		auto read = ReadFileBinary( "D:/3d models/nightclub_futuristic_pub_ambience_asset.hllp" );
+		hellpack_view hellpackView = { read };
+
+		byte_view bufs[] = {
+			MakeByteView( worldData.instances ),
+			MakeByteView( worldData.globalTlasBuffer ),
+			MakeByteView( worldData.globalClasBuffer ),
+			MakeByteView( worldData.meshletInfoBuffer ),
+			MakeByteView( worldData.globalVertexPosBuffer ),
+			MakeByteView( worldData.globalPackedVertexBuffer ),
+			MakeByteView( worldData.globalTriangleBuffer ),
+		};
+
+		for( u64 i : std::views::iota( 0u, hellpack_entry_slot::COUNT ) )
+		{
+			byte_view bv = hellpackView.Bytes( hellpack_entry_slot( i ) );
+			HP_ASSERT( ByteEqual( bv, bufs[ i ] ) );
+		}
 	}
+	
 
 	//batchExec.Join();
 

@@ -116,4 +116,14 @@ struct alignas( 64 ) gpu_bvh2_node
 	std::array<bvh2_node_ref32, 2> childIdx; 
 };
 
+struct instance
+{
+	packed_trs toWorld;
+	bvh2_node_ref32 clasBvhRoot;
+	u32 clasNodeCount;
+	u32 baseMeshletOffset;
+	u32 meshletCount;
+	i32 materialIdx;
+};
+
 #endif // !__HP_MESH_H__
