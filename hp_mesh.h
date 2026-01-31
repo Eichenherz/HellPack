@@ -104,7 +104,7 @@ struct alignas( 64 ) gpu_bvh2_node
 	std::array<bvh2_node_ref32, 2> childIdx; 
 };
 
-struct instance
+struct clustered_instance
 {
 	packed_trs toWorld;
 	float3 aabbMin;
@@ -113,6 +113,20 @@ struct instance
 	u32 clasNodeCount;
 	u32 baseMeshletOffset;
 	u32 meshletCount;
+	i32 materialIdx;
+};
+
+struct instance
+{
+	packed_trs toWorld;
+	float3 aabbMin;
+	float3 aabbMax;
+	bvh2_node_ref32 clasBvhRoot;
+	u32 clasNodeCount;
+	u32 baseVertexOffset;
+	u32 vertexCount;
+	u32 baseIndexOffset;
+	u32 indexCount;
 	i32 materialIdx;
 };
 

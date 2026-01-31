@@ -43,7 +43,28 @@ inline aabb_t<float3> GetAabb( bbox_t in )
 
 // TODO: config
 constexpr u32 MIN_LEAF_PRIM_COUNT = 1;
-constexpr u32 MAX_LEAF_PRIM_COUNT = 1;
+constexpr u32 MAX_LEAF_PRIM_COUNT = 4;
+
+template<typename Idx>
+inline auto TriangleAabbView( std::span<const float3> pos, std::span<const Idx> indices )
+{
+	auto TriangleToAabb = [&] ( Idx tri )
+	{
+		u32 base = 3u * tri;
+
+		float3 p0 = pos[ indices[ base + 0 ] ];
+		float3 p1 = pos[ indices[ base + 1 ] ];
+		float3 p2 = pos[ indices[ base + 2 ] ];
+
+		return aabb_t<float3>{
+			.min = fminf( p0, fminf( p1, p2 ) ),
+			.max = fmaxf( p0, fmaxf( p1, p2 ) )
+		};
+	};
+
+	u32 triCount = std::size( indices ) / 3u;
+	return std::views::iota( 0u, triCount ) | std::views::transform( TriangleToAabb );
+}
 
 struct bvh_output
 {
@@ -87,8 +108,7 @@ struct bvh_builder
 
 		if( c.index.is_leaf() )
 		{
-			HP_ASSERT( c.index.prim_count() == MIN_LEAF_PRIM_COUNT );
-			return MakeBvh2LeafRef( c.index.first_id() );
+			return MakeBvh2LeafRef( c.index.first_id(), c.index.prim_count() );
 		}
 
 		u32 first = c.index.first_id();

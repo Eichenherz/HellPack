@@ -839,9 +839,60 @@ auto PackMeshletsRaytracing( const raw_mesh& rawMesh )
 	return packedMeshlets;
 }
 
+struct packed_mesh
+{
+	std::vector<float3> positions;
+	std::vector<packed_vtx> attrs;
+	std::vector<u16> indices;
+	u16 materialIdx;
+};
+
+auto PackMesh( const raw_mesh& rawMesh )
+{
+	std::span<const float3> pos = rawMesh.pos;
+	std::span<const float3> norm = rawMesh.normals;
+	std::span<const float4> tan = rawMesh.tans;
+	std::span<const float2> uvs = rawMesh.uvs;
+	std::span<const u32> indices = rawMesh.indices;
+
+	auto it = std::ranges::max_element( indices );
+	HP_ASSERT( it != std::cend( indices ) );
+	HP_ASSERT( *it <= u16( -1 ) );
+
+	std::vector<packed_vtx> packedAttrs;
+	packedAttrs.resize( std::size( norm ) );
+
+	for( u64 vi = 0; vi < std::size( norm ); ++vi )
+	{
+		float3 n = norm[ vi ];
+		float4 t = tan[ vi ];
+		float2 uv = uvs[ vi ];
+		float2 octNormal = OctaNormalEncode( n );
+		float tanAngle = EncodeTanToAngle( n, { t.x,t.y,t.z } );
+		u8 tanSign = ( -1.0f == t.w ) ? 1 : 0;
+
+		packedAttrs[ vi ] = {
+			.octNormal = octNormal, 
+			.tanAngle = tanAngle, 
+			.u = uv.x, .v = uv.y, 
+			.tanSign = tanSign 
+		};
+	}
+
+	packed_mesh packedMesh = { .attrs = std::move( packedAttrs ), .materialIdx = rawMesh.materialIdx };
+	packedMesh.positions.reserve( std::size( pos ) );
+	std::ranges::copy( pos, std::back_inserter( packedMesh.positions ) );
+
+	packedMesh.indices.reserve( std::size( indices ) );
+	auto u16IndicesView = indices | std::views::transform( [] ( u32 idx ) { return ( u16 ) idx; } );
+	std::ranges::copy( u16IndicesView, std::back_inserter( packedMesh.indices ) );
+
+	return packedMesh;
+}
+
 struct world_data
 {
-	std::vector<instance> instances;
+	std::vector<clustered_instance> instances;
 	std::vector<gpu_bvh2_node> globalTlasBuffer;
 	std::vector<gpu_bvh2_node> globalClasBuffer;
 	std::vector<rt_meshlet_info> meshletInfoBuffer;
@@ -943,7 +994,7 @@ inline auto MeshletAabbView( const std::ranges::forward_range auto& meshlets )
 inline auto InstanceTlasAabbView( const std::ranges::forward_range auto& instances )
 {
 	return instances | std::views::transform( 
-		[] ( const instance& i ) 
+		[] ( const clustered_instance& i ) 
 		{ 
 			return TransformAABB( i.aabbMin, i.aabbMax, i.toWorld.t, i.toWorld.r, i.toWorld.s );
 		} );
@@ -1100,8 +1151,29 @@ int main()
 
 	bvh_builder bvhBuilder = {};
 
-	std::vector<instance> instances;
+	std::vector<clustered_instance> instances;
 	instances.reserve( std::size( rawNodes ) );
+
+	std::vector<packed_mesh> packedMeshes;
+	packedMeshes.reserve( std::size( rawMeshes ) );
+	for( raw_mesh& m : rawMeshes )
+	{
+		if( !std::size( m.tans ) )
+		{
+			m.tans = ComputeMikkTSpaceTangentsInplace( m );
+		}
+
+		packed_mesh packed = PackMesh( m );
+		packedMeshes.emplace_back( packed );
+
+		const bool buildBvhThresholdReached = std::size( packed.indices ) > 3 * MAX_LEAF_PRIM_COUNT;
+		if( buildBvhThresholdReached )
+		{
+			auto triAabbView = TriangleAabbView( packed.positions, packed.indices );
+			bvh_output bvh = bvhBuilder.BuildBvhOverPrimitives( triAabbView );
+		}
+	}
+
 
 	for( const raw_node& n : rawNodes )
 	{
