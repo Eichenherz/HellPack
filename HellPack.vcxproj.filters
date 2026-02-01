@@ -113,5 +113,14 @@
     <ClInclude Include="hp_serialization.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="range_utils.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="gltf_loader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="hp_types_internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

@@ -18,9 +18,13 @@ inline bvh2_node_ref32   MakeBvh2NodeRef( u32 nodeIndex )
 	assert( nodeIndex <= BVH2_NODE_MASK );
 	return nodeIndex & BVH2_NODE_MASK;
 }
-__forceinline bvh2_node_ref32   MakeBvh2LeafRef( u32 basePrimIdx )
+inline bvh2_node_ref32   MakeBvh2LeafRef( u32 basePrimIds, u32 count )
 {
-	return BVH2_LEAF_BIT | MakeBvh2NodeRef( basePrimIdx );
+	assert( count >= 1 && count <= MAX_LEAF_PRIM_COUNT );
+
+	u32 c = ( count - 1u ) & ( ( 1u << BVH2_LEAF_COUNT_BITS ) - 1u );
+
+	return BVH2_LEAF_BIT | ( basePrimIds & BVH2_LEAF_BASE_MASK ) | ( c << BVH2_LEAF_COUNT_SHIFT );
 }
 
 using scalar  = float;
@@ -41,14 +45,11 @@ inline aabb_t<float3> GetAabb( bbox_t in )
 	return { .min = ToFloat3( in.min ), .max = ToFloat3( in.max ) };
 }
 
-// TODO: config
-constexpr u32 MIN_LEAF_PRIM_COUNT = 1;
-constexpr u32 MAX_LEAF_PRIM_COUNT = 4;
-
-template<typename Idx>
-inline auto TriangleAabbView( std::span<const float3> pos, std::span<const Idx> indices )
-{
-	auto TriangleToAabb = [&] ( Idx tri )
+auto TriangleAabbView( 
+	const std::ranges::random_access_range auto& pos,
+	const std::ranges::random_access_range auto& indices 
+) {
+	auto TriangleToAabb = [&] ( u32 tri )
 	{
 		u32 base = 3u * tri;
 

@@ -75,8 +75,8 @@ enum hellpack_entry_slot : u8
 {
 	INST = 0,
 	TLAS,
-	CLAS,
-	MLET,
+	BLAS,
+//	MLET,
 	VPOS,
 	PVTX,
 	TRI,

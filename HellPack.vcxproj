@@ -160,6 +160,7 @@
   <ItemGroup>
     <ClInclude Include="3rdParty\meshoptimizer\src\meshoptimizer.h" />
     <ClInclude Include="core_types.h" />
+    <ClInclude Include="gltf_loader.h" />
     <ClInclude Include="hp_bcn_compression.h" />
     <ClInclude Include="hp_bvh.h" />
     <ClInclude Include="hp_encoding.h" />
@@ -168,7 +169,9 @@
     <ClInclude Include="hp_math.h" />
     <ClInclude Include="hp_mesh.h" />
     <ClInclude Include="hp_serialization.h" />
+    <ClInclude Include="hp_types_internal.h" />
     <ClInclude Include="mikkt_space.h" />
+    <ClInclude Include="range_utils.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

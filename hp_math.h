@@ -36,6 +36,32 @@ __forceinline float2 FromDX( const DirectX::XMFLOAT2& v ) noexcept { return std:
 __forceinline float3 FromDX( const DirectX::XMFLOAT3& v ) noexcept { return std::bit_cast< float3 >( v ); }
 __forceinline float4 FromDX( const DirectX::XMFLOAT4& v ) noexcept { return std::bit_cast< float4 >( v ); }
 
+inline float2 fminf( float2 a, float2 b )
+{
+	return { fminf( a.x,b.x ), fminf( a.y,b.y ) };
+}
+inline float3 fminf( float3 a, float3 b )
+{
+	return { fminf( a.x,b.x ), fminf( a.y,b.y ), fminf( a.z,b.z ) };
+}
+inline float4 fminf( float4 a, float4 b )
+{
+	return { fminf( a.x,b.x ), fminf( a.y,b.y ), fminf( a.z,b.z ), fminf( a.w,b.w ) };
+}
+
+inline float2 fmaxf( float2 a, float2 b )
+{
+	return { fmaxf( a.x,b.x ), fmaxf( a.y,b.y ) };
+}
+inline float3 fmaxf( float3 a, float3 b )
+{
+	return { fmaxf( a.x,b.x ), fmaxf( a.y,b.y ), fmaxf( a.z,b.z ) };
+}
+inline float4 fmaxf( float4 a, float4 b )
+{
+	return { fmaxf( a.x,b.x ), fmaxf( a.y,b.y ), fmaxf( a.z,b.z ), fmaxf( a.w,b.w ) };
+}
+
 struct u16x3
 {
 	u16 x, y, z;
@@ -222,6 +248,15 @@ inline aabb_t<float3> TransformAABB(
 	XMVECTOR xmNewMax = XMVectorSubtract( xmNewCenter, xmNewExtent );
 
 	return { .min = DX_XMStoreFloat3( xmNewMin ), .max = DX_XMStoreFloat3( xmNewMax ) };
+}
+
+__forceinline aabb_t<float3> TransformAABB( 
+	const aabb_t<float3>&   aabb,
+	const float3&			t, 
+	const float4&			r, 
+	const float3&			s 
+) {
+	return TransformAABB( aabb.min, aabb.max, t, r, s );
 }
 
 #endif // !__HP_MATH_H__
