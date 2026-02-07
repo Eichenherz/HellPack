@@ -174,7 +174,7 @@ inline aabb_t<float3> MergeAabbsMultiple( const std::ranges::forward_range auto&
 		.max = { -FLT_MAX, -FLT_MAX, -FLT_MAX },
 	};
 
-	for( const auto& box : aabbs )
+	for( const aabb_t<float3>& box : aabbs )
 	{
 		out = MergeAabbPair( out, { .min = box.min, .max = box.max } );
 	}

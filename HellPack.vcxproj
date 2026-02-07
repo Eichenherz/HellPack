@@ -163,6 +163,7 @@
     <ClInclude Include="gltf_loader.h" />
     <ClInclude Include="hp_bcn_compression.h" />
     <ClInclude Include="hp_bvh.h" />
+    <ClInclude Include="hp_bvh_builder.h" />
     <ClInclude Include="hp_encoding.h" />
     <ClInclude Include="hp_error.h" />
     <ClInclude Include="hp_material.h" />

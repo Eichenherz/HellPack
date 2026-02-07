@@ -74,11 +74,12 @@ inline byte_view MakeByteView( const R& r )
 enum hellpack_entry_slot : u8
 {
 	INST = 0,
-	TLAS,
-	BLAS,
-//	MLET,
-	VPOS,
-	PVTX,
+//	TLAS,
+//	BLAS,
+	MLET,
+	VTX,
+//	VPOS,
+//	PVTX,
 	TRI,
 	COUNT
 };

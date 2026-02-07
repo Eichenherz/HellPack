@@ -95,7 +95,7 @@
     <ClInclude Include="3rdParty\meshoptimizer\src\meshoptimizer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="hp_bvh.h">
+    <ClInclude Include="hp_bvh_builder.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="hp_mesh.h">
@@ -120,6 +120,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="hp_types_internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="hp_bvh.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

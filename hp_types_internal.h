@@ -62,7 +62,7 @@ struct raw_image_view
 struct packed_mesh
 {
 	std::vector<float3> positions;
-	std::vector<packed_vtx> attrs;
+	std::vector<vertex_attrs> attrs;
 	std::vector<u16> indices;
 	std::vector<gpu_bvh2_node> blas;
 	aabb_t<float3> aabb;

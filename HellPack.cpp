@@ -6,6 +6,7 @@ namespace fs = std::filesystem;
 
 #include <span>
 #include <ranges>
+#include <type_traits>
 
 #include <ankerl/unordered_dense.h>
 
@@ -17,7 +18,7 @@ namespace fs = std::filesystem;
 #include "hp_mesh.h"
 
 #include "hp_material.h"
-#include "hp_bvh.h"
+#include "hp_bvh_builder.h"
 #include "hp_encoding.h"
 #include "hp_bcn_compression.h"
 #include "hp_serialization.h"
@@ -28,6 +29,30 @@ namespace fs = std::filesystem;
 #include "gltf_loader.h"
 
 #include "hp_types_internal.h"
+
+struct meshlet_config
+{
+	float coneWeight = 0.8f;
+	u16 maxVertices = 64;
+	u16 maxTriangles = 128;
+};
+
+struct rt_cluster_config
+{
+	float fillWeight = 0.5f;
+	u16 maxVertices = 64;
+	u16 minTriangles = 16;
+	u16 maxTriangles = 64;
+};
+
+template<typename T>
+concept IsMeshletCfg = std::same_as<T, meshlet_config>;
+
+template<typename T>
+concept IsRtClusterCfg = std::same_as<T, rt_cluster_config>;
+
+template<typename T>
+concept IsClusterConfig = IsMeshletCfg<T> || IsRtClusterCfg<T>;
 
 // TODO: no inplace remap !
 void ReindexAndOptimizeMesh( raw_mesh& rawMesh )
@@ -84,23 +109,39 @@ struct __meshopt_meshlets
 	std::vector<u8> triangles;
 };
 
-__meshopt_meshlets MakeMeshletsRaytracing( 
+template<IsClusterConfig Cfg>
+__meshopt_meshlets MeshoptMakeClusters( 
 	std::span<const float3> pos, 
 	std::span<const u32> indices, 
-	cluster_raytracing clusterConfig 
-) {
+	Cfg cfg 
+) { 
 	const u64 indexCount = std::size( indices );
 
-	// NOTE ( meshoptimizer ): use minTriangles to compute worst case bound
-	const u64 maxMeshletCount = meshopt_buildMeshletsBound( indexCount, clusterConfig.maxVertices, clusterConfig.minTriangles );
+	u64 triangleBound = cfg.maxTriangles;
+	if constexpr( IsRtClusterCfg<Cfg> )
+	{
+		// NOTE( meshoptimizer ): use minTriangles to compute worst case bound
+		triangleBound = cfg.minTriangles;
+	}
+	
+	const u64 maxMeshletCount = meshopt_buildMeshletsBound( indexCount, cfg.maxVertices, triangleBound );
 	std::vector<meshopt_Meshlet> meshlets( maxMeshletCount );
 	std::vector<u32> mletVtx( indexCount );
 	std::vector<u8> mletTris( indexCount );
 
-	const u64 meshletCount = meshopt_buildMeshletsSpatial( 
-		std::data( meshlets ), std::data( mletVtx ), std::data( mletTris ), std::data( indices ), std::size( indices ), 
-		&pos[ 0 ].x, std::size( pos ), sizeof( pos[ 0 ] ), clusterConfig.maxVertices, 
-		clusterConfig.minTriangles, clusterConfig.maxTriangles, clusterConfig.fillWeight);
+	u64 meshletCount;
+	if constexpr( IsMeshletCfg<Cfg> )
+	{
+		meshletCount = meshopt_buildMeshlets(
+			&meshlets[ 0 ], &mletVtx[ 0 ], &mletTris[ 0 ], &indices[ 0 ], std::size( indices ),
+			&pos[ 0 ].x, std::size( pos ), sizeof( pos[ 0 ] ), cfg.maxVertices, cfg.maxTriangles, cfg.coneWeight );
+	}
+	else if constexpr( IsRtClusterCfg<Cfg> )
+	{
+		meshletCount = meshopt_buildMeshletsSpatial(
+			&meshlets[ 0 ], &mletVtx[ 0 ], &mletTris[ 0 ], &indices[ 0 ], std::size( indices ), &pos[ 0 ].x, 
+			std::size( pos ), sizeof( pos[ 0 ] ), cfg.maxVertices, cfg.minTriangles, cfg.maxTriangles, cfg.fillWeight );
+	}
 
 	const meshopt_Meshlet& last = meshlets[ meshletCount - 1 ];
 
@@ -137,16 +178,74 @@ inline auto GetMeshletLocalAttrStream(
 	return localStream;
 }
 
-auto PackMeshletsRaytracing( const raw_mesh& rawMesh )
+
+std::vector<meshlet> PackMeshlets( const raw_mesh& rawMesh )
 {
-	__meshopt_meshlets meshlets = MakeMeshletsRaytracing( rawMesh.pos, rawMesh.indices, cluster_raytracing{} );
+	__meshopt_meshlets meshlets = MeshoptMakeClusters( rawMesh.pos, rawMesh.indices, meshlet_config{} );
 
 	std::span<const float3> pos = rawMesh.pos;
 	std::span<const float3> norm = rawMesh.normals;
 	std::span<const float4> tan = rawMesh.tans;
 	std::span<const float2> uvs = rawMesh.uvs;
 
-	std::vector<rt_meshlet> packedMeshlets;
+	std::vector<meshlet> packedMeshlets;
+	packedMeshlets.reserve( std::size( meshlets.info ) );
+
+	for( const meshopt_Meshlet& m : meshlets.info )
+	{
+		auto firstTriangleIt = std::cbegin( meshlets.triangles ) + m.triangle_offset;
+		std::vector<u8> triangles = { firstTriangleIt, firstTriangleIt + m.triangle_count };
+
+		std::vector<float3> mletPosStream = GetMeshletLocalAttrStream( pos, meshlets.vertices, m.vertex_offset, m.vertex_count );
+
+		auto mletNormStream = GetMeshletLocalAttrStream( norm, meshlets.vertices, m.vertex_offset, m.vertex_count );
+		auto mletTanStream = GetMeshletLocalAttrStream( tan, meshlets.vertices, m.vertex_offset, m.vertex_count );
+		auto mletUvStream = GetMeshletLocalAttrStream( uvs, meshlets.vertices, m.vertex_offset, m.vertex_count );
+
+		std::vector<packed_vtx> packedVtx( std::size( mletPosStream ) );
+		for( u64 vi = 0; vi < m.vertex_count; ++vi )
+		{
+			float3 p = mletPosStream[ vi ];
+			float3 n = mletNormStream[ vi ];
+			float4 t = mletTanStream[ vi ];
+			float2 uv = mletUvStream[ vi ];
+			float2 octNormal = OctaNormalEncode( n );
+			float tanAngle = EncodeTanToAngle( n, { t.x,t.y,t.z } );
+			u8 tanSign = ( -1.0f == t.w ) ? 1 : 0;
+
+			packedVtx[ vi ] = {
+				.pos = p,
+				.octNormal = octNormal, 
+				.tanAngle = tanAngle, 
+				.u = uv.x, .v = uv.y, 
+				.tanSign = tanSign 
+			};
+		}
+
+		const aabb_t<float3> aabb = ComputeAabb( mletPosStream );
+
+		meshlet rtMeshlet = {
+			.vertices = std::move( packedVtx ), 
+			.triangles = std::move( triangles ),
+			.aabbMin = aabb.min, 
+			.aabbMax = aabb.max 
+		};
+		packedMeshlets.push_back( std::move( rtMeshlet ) );
+	}
+
+	return packedMeshlets;
+}
+
+std::vector<rt_cluster> PackClustersRaytracing( const raw_mesh& rawMesh )
+{
+	__meshopt_meshlets meshlets = MeshoptMakeClusters( rawMesh.pos, rawMesh.indices, rt_cluster_config{} );
+
+	std::span<const float3> pos = rawMesh.pos;
+	std::span<const float3> norm = rawMesh.normals;
+	std::span<const float4> tan = rawMesh.tans;
+	std::span<const float2> uvs = rawMesh.uvs;
+
+	std::vector<rt_cluster> packedMeshlets;
 	packedMeshlets.reserve( std::size( meshlets.info ) );
 
 	for( const meshopt_Meshlet& m : meshlets.info )
@@ -162,7 +261,7 @@ auto PackMeshletsRaytracing( const raw_mesh& rawMesh )
 		auto mletTanStream = GetMeshletLocalAttrStream( tan, meshlets.vertices, m.vertex_offset, m.vertex_count );
 		auto mletUvStream = GetMeshletLocalAttrStream( uvs, meshlets.vertices, m.vertex_offset, m.vertex_count );
 
-		std::vector<packed_vtx> packedAttrs( std::size( mletNormStream ) );
+		std::vector<vertex_attrs> packedAttrs( std::size( mletNormStream ) );
 		for( u64 vi = 0; vi < m.vertex_count; ++vi )
 		{
 			float3 n = mletNormStream[ vi ];
@@ -180,7 +279,7 @@ auto PackMeshletsRaytracing( const raw_mesh& rawMesh )
 			};
 		}
 
-		rt_meshlet rtMeshlet = {
+		rt_cluster rtMeshlet = {
 			.positions = std::move( mletPosStream ), 
 			.packedAttrs = std::move( packedAttrs ), 
 			.triangles = std::move( triangles ),
@@ -193,13 +292,16 @@ auto PackMeshletsRaytracing( const raw_mesh& rawMesh )
 	return packedMeshlets;
 }
 
-auto PackVertexAttributes( std::span<const float3> normals, std::span<const float4> tans, std::span<const float2> uvs )
-{
+std::vector<vertex_attrs> PackVertexAttributes( 
+	std::span<const float3> normals, 
+	std::span<const float4> tans, 
+	std::span<const float2> uvs 
+) {
 	u64 vtxCount = std::size( normals );
 
 	HP_ASSERT( ( vtxCount == std::size( tans ) ) && ( vtxCount == std::size( uvs ) ) );
 
-	std::vector<packed_vtx> packedAttrs;
+	std::vector<vertex_attrs> packedAttrs;
 	packedAttrs.resize( vtxCount );
 
 	for( u64 vi = 0; vi < vtxCount; ++vi )
@@ -224,16 +326,15 @@ auto PackVertexAttributes( std::span<const float3> normals, std::span<const floa
 
 void ValidateRawMeshAssumptions( const raw_mesh& rawMesh )
 {
-	std::span<const u32> indices = rawMesh.indices;
-	auto it = std::ranges::max_element( indices );
-	HP_ASSERT( it != std::cend( indices ) );
+	auto it = std::ranges::max_element( rawMesh.indices );
+	HP_ASSERT( it != std::cend( rawMesh.indices ) );
 	HP_ASSERT( *it <= u16( -1 ) );
 	HP_ASSERT( rawMesh.materialIdx <= i32( u16( -1 ) ) );
 }
 
 packed_mesh PackMesh( const raw_mesh& rawMesh, bvh_builder& bvhBuilder )
 {
-	std::vector<packed_vtx> packedAttrs;
+	std::vector<vertex_attrs> packedAttrs;
 	
 	if( !std::size( rawMesh.tans ) )
 	{
@@ -249,7 +350,7 @@ packed_mesh PackMesh( const raw_mesh& rawMesh, bvh_builder& bvhBuilder )
 	const auto& indices = rawMesh.indices;
 
 	std::vector<float3> meshPos( std::size( positions ) );
-	std::vector<packed_vtx> meshVtxAttr( std::size( packedAttrs ) );
+	std::vector<vertex_attrs> meshVtxAttr( std::size( packedAttrs ) );
 	std::vector<u16> meshIdx( std::size( indices ) );
 	
 	std::vector<gpu_bvh2_node> blas;
@@ -305,11 +406,77 @@ using index_t = u16;
 struct clustered_world_data
 {
 	std::vector<clustered_instance> instances;
+	std::vector<meshlet_info> meshletInfoBuffer;
+	std::vector<packed_vtx> globalMeshletVertexBuffer;
+	std::vector<u8> globalMeshletTriangleBuffer;
+
+	range64 AppendMeshlets( const std::ranges::forward_range auto& meshlets )
+	{
+		HP_ASSERT( std::size( globalMeshletVertexBuffer ) < u32( -1 ) );
+		HP_ASSERT( std::size( globalMeshletTriangleBuffer ) < u32( -1 ) );
+
+		u64 totalVertexCount = 0;
+		u64 totalTrianlgeCount = 0;
+		for( const meshlet& m : meshlets )
+		{
+			const u64 vertexCount = std::size( m.vertices );
+			const u64 triangleCount = std::size( m.triangles );
+
+			HP_ASSERT( ( vertexCount <= u8( -1 ) ) && ( triangleCount <= u8( -1 ) ) );
+
+			totalVertexCount += vertexCount;
+			totalTrianlgeCount += triangleCount;
+		}
+		globalMeshletVertexBuffer.reserve( std::size( globalMeshletVertexBuffer ) + totalVertexCount );
+		globalMeshletTriangleBuffer.reserve( std::size( globalMeshletTriangleBuffer ) + totalTrianlgeCount );
+
+		HP_ASSERT( std::size( meshletInfoBuffer ) <= u32( -1 ) );
+		const u32 baseMeshletOffset = ( u32 ) std::size( meshletInfoBuffer );
+		meshletInfoBuffer.reserve( baseMeshletOffset + std::size( meshlets ) );
+
+		for( const meshlet& m : meshlets )
+		{
+			meshlet_info info = {
+				.aabbMin = m.aabbMin,
+				.aabbMax = m.aabbMax,
+				.vertexOffset = ( u32 ) std::size( globalMeshletVertexBuffer ),
+				.triangleOffset = ( u32 ) std::size( globalMeshletTriangleBuffer ),
+				.vertexCount = ( u8 ) std::size( m.vertices ),
+				.triangleCount = ( u8 ) std::size( m.triangles )
+			};
+
+			std::ranges::copy( m.vertices, std::back_inserter( globalMeshletVertexBuffer ) );
+			std::ranges::copy( m.triangles, std::back_inserter( globalMeshletTriangleBuffer ) );
+			meshletInfoBuffer.push_back( info );
+		}
+
+		HP_ASSERT( std::size( meshlets ) <= u32( -1 ) );
+		return { .baseOffset = baseMeshletOffset, .count = ( u32 ) std::size( meshlets ) };
+	}
+
+	inline std::vector<u8> HellPackSerialize()
+	{
+		byte_view bufs[] = {
+			MakeByteView( instances ),
+			MakeByteView( meshletInfoBuffer ),
+			MakeByteView( globalMeshletVertexBuffer ),
+			MakeByteView( globalMeshletTriangleBuffer ),
+		};
+
+		HP_ASSERT( std::size( bufs ) == hellpack_entry_slot::COUNT );
+
+		return MakeHellpackBlob( bufs );
+	}
+};
+
+struct rt_clustered_world_data
+{
+	std::vector<rt_clustered_instance> instances;
 	std::vector<gpu_bvh2_node> globalTlasBuffer;
 	std::vector<gpu_bvh2_node> globalClasBuffer;
-	std::vector<rt_meshlet_info> meshletInfoBuffer;
+	std::vector<meshlet_info> meshletInfoBuffer;
 	std::vector<position_t> globalVertexPosBuffer;
-	std::vector<packed_vtx> globalPackedVertexBuffer;
+	std::vector<vertex_attrs> globalPackedVertexBuffer;
 	std::vector<u8> globalTriangleBuffer;
 
 	range64 AppendMeshlets( const std::ranges::forward_range auto& meshlets )
@@ -321,7 +488,7 @@ struct clustered_world_data
 
 		u64 totalVertexCount = 0;
 		u64 totalTrianlgeCount = 0;
-		for( const rt_meshlet& m : meshlets )
+		for( const rt_cluster& m : meshlets )
 		{
 			const u64 vertexCount = std::size( m.positions );
 			const u64 triangleCount = std::size( m.triangles );
@@ -340,9 +507,9 @@ struct clustered_world_data
 		const u32 baseMeshletOffset = ( u32 ) std::size( meshletInfoBuffer );
 		meshletInfoBuffer.reserve( baseMeshletOffset + std::size( meshlets ) );
 
-		for( const rt_meshlet& m : meshlets )
+		for( const rt_cluster& m : meshlets )
 		{
-			rt_meshlet_info info = {
+			meshlet_info info = {
 				.aabbMin = m.aabbMin,
 				.aabbMax = m.aabbMax,
 				.vertexOffset = ( u32 ) std::size( globalVertexPosBuffer ),
@@ -379,16 +546,16 @@ struct clustered_world_data
 	}
 };
 
-struct world_data
+struct rt_world_data
 {
 	std::vector<mesh_instance> instances;
 	std::vector<gpu_bvh2_node> globalTlasBuffer;
 	std::vector<gpu_bvh2_node> globalBlasBuffer;
 	std::vector<position_t> globalVertexPosBuffer;
-	std::vector<packed_vtx> globalPackedVertexBuffer;
+	std::vector<vertex_attrs> globalPackedVertexBuffer;
 	std::vector<index_t> globalTriangleBuffer;
 
-	mesh_desc AppendMesh( const packed_mesh& mesh )
+	rt_mesh_desc AppendMesh( const packed_mesh& mesh )
 	{
 		HP_ASSERT( std::size( globalVertexPosBuffer ) == std::size( globalPackedVertexBuffer ) );
 		HP_ASSERT( std::size( globalVertexPosBuffer ) < u32( -1 ) );
@@ -586,6 +753,15 @@ inline auto ReadFileBinary( const char* path )
 
 constexpr bool CHECK_SERIALIZATION_RESULT = true;
 
+struct mesh_desc
+{
+	float3 aabbMin;
+	float3 aabbMax;
+	u32 baseMeshletOffset;
+	u16 meshletCount;
+	u16 materialIdx;
+};
+
 int main()
 {
 	const std::string gltfFilePath = "D:/3d models/nightclub_futuristic_pub_ambience_asset.glb";
@@ -606,56 +782,56 @@ int main()
 	//auto Proc = [&] ( u32 idx ) { bcnBatch.ProcessItem( idx ); };
 	//batchExec.RunBatch( Proc, std::max<u32>( 1, bcnBatch.size / 4 ), bcnBatch.size );
 
-	world_data worldData = {};
+	clustered_world_data worldData = {};
 
-	bvh_builder bvhBuilder = {};
+	//bvh_builder bvhBuilder = {};
 
-	std::vector<packed_mesh> packedMeshes;
-	packedMeshes.reserve( std::size( rawMeshes ) );
-
-	ankerl::unordered_dense::map<u32, mesh_desc> meshDescMap;
-
+	std::vector<mesh_desc> meshDesc( std::size( rawMeshes ) );
 	for( u64 mi : std::views::iota( 0u, std::size( rawMeshes ) ) )
 	{
-		const raw_mesh& m = rawMeshes[ mi ];
+		raw_mesh& m = rawMeshes[ mi ];
 
-		ValidateRawMeshAssumptions( m );
+		if( !std::size( m.tans ) )
+		{
+			m.tans = ComputeMikkTSpaceTangentsInplace( m );
+		}
 
-		packed_mesh packed = PackMesh( m, bvhBuilder );
-		packedMeshes.emplace_back( packed );
+		std::vector<meshlet> meshlets = PackMeshlets( m );
+		auto aabbView = meshlets | std::views::transform( 
+			[] ( const meshlet& m ) { return aabb_t<float3>{.min = m.aabbMin, .max = m.aabbMax }; } );
 
-		mesh_desc meshDesc = worldData.AppendMesh( packed );
-		meshDescMap.emplace( mi, meshDesc );
+		aabb_t<float3> aabb = MergeAabbs( aabbView );
+
+		range64 meshletsRange = worldData.AppendMeshlets( meshlets );
+
+		meshDesc[ mi ] = {
+			.aabbMin = aabb.min,
+			.aabbMax = aabb.max,
+			.baseMeshletOffset = ( u32 ) meshletsRange.baseOffset,
+			.meshletCount = ( u16 ) meshletsRange.count,
+			.materialIdx = ( u16 ) m.materialIdx
+		};
 	}
 
-	std::vector<mesh_instance> instances;
+	std::vector<clustered_instance> instances;
 	instances.reserve( std::size( rawNodes ) );
 	for( const raw_node& n : rawNodes )
 	{
 		if( INVALID_IDX == n.meshIdx ) continue;
 
-		auto[ aabbMin, aabbMax ] = TransformAABB( 
-			packedMeshes[ n.meshIdx ].aabb, n.toWorld.t, n.toWorld.r, n.toWorld.s );
-		auto it = meshDescMap.find( n.meshIdx );
-		HP_ASSERT( it != std::cend( meshDescMap ) );
+		const mesh_desc& md = meshDesc[ n.meshIdx ];
 
 		instances.push_back( {
 			.toWorld = n.toWorld,
-			.aabbMin = aabbMin,
-			.aabbMax = aabbMax,
-			.meshDesc = it->second,
-			.materialIdx = packedMeshes[ n.meshIdx ].materialIdx
+			.aabbMin = md.aabbMin,
+			.aabbMax = md.aabbMax,
+			.baseMeshletOffset = md.baseMeshletOffset,
+			.meshletCount = md.meshletCount,
+			.materialIdx = md.meshletCount
 		} );
 	}
 
-	auto tlasAabbsView = InstanceTlasAabbView( instances );
-	bvh_output tlasOutput = bvhBuilder.BuildBvhOverPrimitives( tlasAabbsView );
-	worldData.globalTlasBuffer = std::move( tlasOutput.gpuNodes );
-
-	HP_ASSERT( std::size( instances ) == std::size( tlasOutput.primitiveIndices ) );
-	worldData.instances.reserve( std::size( instances ) );
-	auto permutedInstances = PermutedView( instances, tlasOutput.primitiveIndices );
-	std::ranges::copy( permutedInstances, std::back_inserter( worldData.instances ) );
+	worldData.instances = std::move( instances );
 
 	std::vector<u8> blob = worldData.HellPackSerialize();
 	WriteFileBinary( "D:/3d models/nightclub_futuristic_pub_ambience_asset.hllp", blob );
@@ -667,11 +843,9 @@ int main()
 
 		byte_view bufs[] = {
 			MakeByteView( worldData.instances ),
-			MakeByteView( worldData.globalTlasBuffer ),
-			MakeByteView( worldData.globalBlasBuffer ),
-			MakeByteView( worldData.globalVertexPosBuffer ),
-			MakeByteView( worldData.globalPackedVertexBuffer ),
-			MakeByteView( worldData.globalTriangleBuffer ),
+			MakeByteView( worldData.meshletInfoBuffer ),
+			MakeByteView( worldData.globalMeshletVertexBuffer ),
+			MakeByteView( worldData.globalMeshletTriangleBuffer ),
 		};
 
 		for( u64 i : std::views::iota( 0u, hellpack_entry_slot::COUNT ) )
