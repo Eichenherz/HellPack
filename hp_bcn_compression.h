@@ -13,9 +13,9 @@
 #include <span>
 #include <vector>
 
+// NOTE: only BC2, BC3, BC5, BC6H, BC7
 constexpr u64 BLOCK_PIXEL_PITCH = 4;
 constexpr u64 BLOCK_SIZE_IN_BYTES = 4 * 4 * BLOCK_PIXEL_PITCH;
-constexpr u64 BC_57_BLOCK_SIZE_IN_BYTES = 16;
 
 
 enum class bc_format_t : u8
@@ -35,14 +35,6 @@ constexpr u32 BCnFormatToBlockSizeInBytes( bc_format_t fmt )
     }
 }
 
-struct bcn_compression_job
-{
-    std::span<const u8>     rgba8;
-    u16                     width;
-    u16                     height;
-    bc_format_t             format;
-};
-
 struct bcn_compression_result
 {
     std::vector<u8>         data;
@@ -57,7 +49,7 @@ struct bcn_compression_result
 using rgba4x4 = std::array<u8, BLOCK_SIZE_IN_BYTES>;
 
 // TODO: check rowPitch !!!!
-inline auto GatherBlockRGBA8_Clamp( std::span<const u8> rgba8, u32 width, u32 height, u32 blockX, u32 blockY )
+inline rgba4x4 GatherBlockRGBA8_Clamp( std::span<const u8> rgba8, u32 width, u32 height, u32 blockX, u32 blockY )
 {
     rgba4x4 blockRGBA;
     [[unroll]]
@@ -83,8 +75,7 @@ inline auto GatherBlockRGBA8_Clamp( std::span<const u8> rgba8, u32 width, u32 he
     return blockRGBA;
 }
 
-
-inline auto CompressRBGA8ToBC7( std::span<const u8> rgba8, u16 width, u16 height ) 
+inline bcn_compression_result CompressRBGA8ToBC7( std::span<const u8> rgba8, u16 width, u16 height ) 
 {
     constexpr u32 bcnBlockSzInBytes = BCnFormatToBlockSizeInBytes( bc_format_t::BC7_RGBA );
 
@@ -93,6 +84,8 @@ inline auto CompressRBGA8ToBC7( std::span<const u8> rgba8, u16 width, u16 height
     u32 blockCount = blocksX * blocksY;
     
     bcn_compression_result bcn = { blocksX, blocksY, bcnBlockSzInBytes };
+
+    HP_ASSERT( std::size( bcn.data ) );
 
     // TODO: don't call these evey job ?
     bc7enc_compress_block_params bc7CmpParams;
@@ -112,7 +105,7 @@ inline auto CompressRBGA8ToBC7( std::span<const u8> rgba8, u16 width, u16 height
     return bcn;
 }
 
-inline auto CompressRBGA8ToBC5( std::span<const u8> rgba8, u16 width, u16 height )
+inline bcn_compression_result CompressRBGA8ToBC5( std::span<const u8> rgba8, u16 width, u16 height )
 {
     constexpr u32 bcnBlockSzInBytes = BCnFormatToBlockSizeInBytes( bc_format_t::BC5_RG );
 
@@ -121,6 +114,8 @@ inline auto CompressRBGA8ToBC5( std::span<const u8> rgba8, u16 width, u16 height
     u32 blockCount = blocksX * blocksY;
 
     bcn_compression_result bcn = { blocksX, blocksY, bcnBlockSzInBytes };
+
+    HP_ASSERT( std::size( bcn.data ) );
 
     rgbcx::init( rgbcx::bc1_approx_mode::cBC1Ideal );
     for( u32 bi = 0; bi < blockCount; ++bi )
@@ -137,15 +132,15 @@ inline auto CompressRBGA8ToBC5( std::span<const u8> rgba8, u16 width, u16 height
     return bcn;
 }
 
-inline bcn_compression_result CompressRGBA8ToBCn( const bcn_compression_job& job ) 
+inline bcn_compression_result CompressRGBA8ToBCn( std::span<const u8> rgba8, u32 width, u32 height, bc_format_t format ) 
 {
-    if( bc_format_t::BC7_RGBA == job.format )
+    if( bc_format_t::BC7_RGBA == format )
     {
-        return CompressRBGA8ToBC7( job.rgba8, job.width, job.height );
+        return CompressRBGA8ToBC7( rgba8, width, height );
     }
-    else if( bc_format_t::BC5_RG == job.format )
+    else if( bc_format_t::BC5_RG == format )
     {
-        return CompressRBGA8ToBC5( job.rgba8, job.width, job.height );
+        return CompressRBGA8ToBC5( rgba8, width, height );
     }
     else
     {

@@ -11,15 +11,13 @@ enum alpha_mode : u8
 	ALPHA_MODE_BLEND,
 };
 
-struct material_info
+struct raw_material_info
 {
 	float4 baseColFactor;
 	float metallicFactor;
 	float roughnessFactor;
 	float alphaCutoff;
-	//float pad1;
 	float3 emissiveFactor;
-	//float pad2;
 
 	u16 baseColorIdx;
 	u16 metallicRoughnessIdx;
@@ -73,6 +71,24 @@ constexpr sampler_config DEFAULT_SAMPLER = {
 	.filterModeT = sampler_filter_mode_flags::FILTER_LINEAR,
 	.wrapModeS = sampler_wrap_mode_flags::WRAP_REPEAT,
 	.wrapModeT = sampler_wrap_mode_flags::WRAP_REPEAT
+};
+
+struct material_desc
+{
+	range64 baseColor;
+	range64 metallicRoughness;
+	range64 normal;
+	range64 emissive;
+
+	float4 baseColFactor;
+	float metallicFactor;
+	float roughnessFactor;
+	float alphaCutoff;
+	float3 emissiveFactor;
+
+	u16 samplerIdx;
+
+	alpha_mode alphaMode;
 };
 
 #endif // !__HP_MATERIAL_H__

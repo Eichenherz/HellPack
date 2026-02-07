@@ -5,7 +5,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define TINYGLTF_NOEXCEPTION
-#include <tinygltf/tiny_gltf.h>
+#include <tiny_gltf.h>
 
 #include <iostream>
 #include <span>
@@ -19,6 +19,8 @@
 #include "hp_mesh.h"
 #include "hp_material.h"
 #include "hp_types_internal.h"
+
+constexpr u64 DEFAULT_SAMPLER_IDX = 0;
 
 inline packed_trs XM_CALLCONV XMComposePackedTRS( packed_trs a, packed_trs b )
 {
@@ -288,7 +290,7 @@ struct gltf_loader
 		std::cout << "Successfully loaded the file.\n";
 	}
 
-	auto GetIndexBufferFromStream( const tinygltf::Accessor& idxAccessor ) const
+	std::vector<u32> GetIndexBufferFromStream( const tinygltf::Accessor& idxAccessor ) const
 	{
 		HP_ASSERT( TINYGLTF_TYPE_SCALAR == idxAccessor.type );
 
@@ -324,7 +326,7 @@ struct gltf_loader
 		return normalized;
 	}
 
-	auto ProcessNodes() const
+	std::vector<raw_node> ProcessNodes() const
 	{
 		const std::vector<tinygltf::Node>& nodes = model.nodes;
 
@@ -371,7 +373,7 @@ struct gltf_loader
 		return flatNodes;
 	}
 
-	auto ProcessMeshes() const
+	std::vector<raw_mesh> ProcessMeshes() const
 	{
 		u64 meshPrimitiveCount = 0;
 		for( const tinygltf::Mesh& m : model.meshes )
@@ -423,9 +425,12 @@ struct gltf_loader
 		return meshesOut;
 	}
 
-	auto ProcessSamplers() const
+	// TODO: explicitly enforce the 0th sampler is default convention
+	std::vector<sampler_config> ProcessSamplers() const
 	{
 		std::vector<sampler_config> samplersOut;
+		samplersOut.push_back( DEFAULT_SAMPLER );
+
 		samplersOut.reserve( std::size( model.samplers ) );
 		for( const tinygltf::Sampler& sampler : model.samplers )
 		{
@@ -437,24 +442,20 @@ struct gltf_loader
 			};
 			samplersOut.push_back( samplerConfig );
 		}
-		if( std::size( model.samplers ) == 0 )
-		{
-			samplersOut.push_back( DEFAULT_SAMPLER );
-		}
 
 		return samplersOut;
 	}
 
-	auto ProcessMaterials() const
+	std::vector<raw_material_info> ProcessMaterials() const
 	{
-		std::vector<material_info> materialsOut;
+		std::vector<raw_material_info> materialsOut;
 		materialsOut.reserve( std::size( model.materials ) );
 
 		for( const tinygltf::Material& material : model.materials )
 		{
 			const tinygltf::PbrMetallicRoughness& pbrInfo = material.pbrMetallicRoughness;
 
-			material_info metadata = {
+			raw_material_info metadata = {
 				.baseColFactor = {
 					( float ) pbrInfo.baseColorFactor[ 0 ],
 					( float ) pbrInfo.baseColorFactor[ 1 ],
@@ -502,8 +503,8 @@ struct gltf_loader
 
 			// NOTE: will have -1/DEFAULT and possibly other samplers, so at most size 2
 			HP_ASSERT( std::size( samplers ) <= 2 );
-			auto it = std::ranges::find_if( samplers, []( i32 x ){ return x != -1; });
-			metadata.samplerIdx = ( it != std::cend( samplers ) ) ? *it : -1;
+			auto it = std::ranges::find_if( samplers, []( i32 x ){ return x != -1; } );
+			metadata.samplerIdx = ( it != std::cend( samplers ) ) ? *it : DEFAULT_SAMPLER_IDX;
 
 			materialsOut.emplace_back( metadata );
 		}

@@ -71,7 +71,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>D:\EichenRepos\HellPack\3rdParty\bc7enc_rdo;D:\EichenRepos\HellPack\3rdParty\unordered_dense\include;D:\EichenRepos\HellPack\3rdParty\madmannbvh\src;D:\EichenRepos\HellPack\3rdParty\MikkTSpace;D:\EichenRepos\HellPack\3rdParty\meshoptimizer\src;D:\EichenRepos\HellPack\3rdParty;$(IncludePath)</IncludePath>
+    <IncludePath>D:\EichenRepos\HellPack\3rdParty\dds;D:\EichenRepos\HellPack\3rdParty\bc7enc_rdo;D:\EichenRepos\HellPack\3rdParty\unordered_dense\include;D:\EichenRepos\HellPack\3rdParty\madmannbvh\src;D:\EichenRepos\HellPack\3rdParty\MikkTSpace;D:\EichenRepos\HellPack\3rdParty\meshoptimizer\src;D:\EichenRepos\HellPack\3rdParty\tinygltf;$(IncludePath)</IncludePath>
     <SourcePath>$(SourcePath)</SourcePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">

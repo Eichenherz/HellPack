@@ -10,6 +10,8 @@ namespace fs = std::filesystem;
 
 #include <ankerl/unordered_dense.h>
 
+#include <dds.h>
+
 #include "core_types.h"
 #include "hp_error.h"
 
@@ -32,17 +34,17 @@ namespace fs = std::filesystem;
 
 struct meshlet_config
 {
-	float coneWeight = 0.8f;
-	u16 maxVertices = 64;
-	u16 maxTriangles = 128;
+	float   coneWeight = 0.8f;
+	u16		maxVertices = 64;
+	u16		maxTriangles = 128;
 };
 
 struct rt_cluster_config
 {
-	float fillWeight = 0.5f;
-	u16 maxVertices = 64;
-	u16 minTriangles = 16;
-	u16 maxTriangles = 64;
+	float   fillWeight = 0.5f;
+	u16		maxVertices = 64;
+	u16		minTriangles = 16;
+	u16		maxTriangles = 64;
 };
 
 template<typename T>
@@ -401,19 +403,22 @@ packed_mesh PackMesh( const raw_mesh& rawMesh, bvh_builder& bvhBuilder )
 }
 
 using position_t = float3;
-using index_t = u16;
+using index_t = u8;
 
 struct clustered_world_data
 {
 	std::vector<clustered_instance> instances;
 	std::vector<meshlet_info> meshletInfoBuffer;
-	std::vector<packed_vtx> globalMeshletVertexBuffer;
-	std::vector<u8> globalMeshletTriangleBuffer;
+	std::vector<packed_vtx> meshletVertexBuffer;
+	std::vector<index_t> meshletTriangleBuffer;
+	std::vector<material_desc> materials;
+	std::vector<u8> textureDdsBlob;
+	std::vector<sampler_config> samplers;
 
 	range64 AppendMeshlets( const std::ranges::forward_range auto& meshlets )
 	{
-		HP_ASSERT( std::size( globalMeshletVertexBuffer ) < u32( -1 ) );
-		HP_ASSERT( std::size( globalMeshletTriangleBuffer ) < u32( -1 ) );
+		HP_ASSERT( std::size( meshletVertexBuffer ) < u32( -1 ) );
+		HP_ASSERT( std::size( meshletTriangleBuffer ) < u32( -1 ) );
 
 		u64 totalVertexCount = 0;
 		u64 totalTrianlgeCount = 0;
@@ -427,8 +432,8 @@ struct clustered_world_data
 			totalVertexCount += vertexCount;
 			totalTrianlgeCount += triangleCount;
 		}
-		globalMeshletVertexBuffer.reserve( std::size( globalMeshletVertexBuffer ) + totalVertexCount );
-		globalMeshletTriangleBuffer.reserve( std::size( globalMeshletTriangleBuffer ) + totalTrianlgeCount );
+		meshletVertexBuffer.reserve( std::size( meshletVertexBuffer ) + totalVertexCount );
+		meshletTriangleBuffer.reserve( std::size( meshletTriangleBuffer ) + totalTrianlgeCount );
 
 		HP_ASSERT( std::size( meshletInfoBuffer ) <= u32( -1 ) );
 		const u32 baseMeshletOffset = ( u32 ) std::size( meshletInfoBuffer );
@@ -439,14 +444,14 @@ struct clustered_world_data
 			meshlet_info info = {
 				.aabbMin = m.aabbMin,
 				.aabbMax = m.aabbMax,
-				.vertexOffset = ( u32 ) std::size( globalMeshletVertexBuffer ),
-				.triangleOffset = ( u32 ) std::size( globalMeshletTriangleBuffer ),
+				.vertexOffset = ( u32 ) std::size( meshletVertexBuffer ),
+				.triangleOffset = ( u32 ) std::size( meshletTriangleBuffer ),
 				.vertexCount = ( u8 ) std::size( m.vertices ),
 				.triangleCount = ( u8 ) std::size( m.triangles )
 			};
 
-			std::ranges::copy( m.vertices, std::back_inserter( globalMeshletVertexBuffer ) );
-			std::ranges::copy( m.triangles, std::back_inserter( globalMeshletTriangleBuffer ) );
+			std::ranges::copy( m.vertices, std::back_inserter( meshletVertexBuffer ) );
+			std::ranges::copy( m.triangles, std::back_inserter( meshletTriangleBuffer ) );
 			meshletInfoBuffer.push_back( info );
 		}
 
@@ -459,8 +464,11 @@ struct clustered_world_data
 		byte_view bufs[] = {
 			MakeByteView( instances ),
 			MakeByteView( meshletInfoBuffer ),
-			MakeByteView( globalMeshletVertexBuffer ),
-			MakeByteView( globalMeshletTriangleBuffer ),
+			MakeByteView( meshletVertexBuffer ),
+			MakeByteView( meshletTriangleBuffer ),
+			MakeByteView( materials ),
+			MakeByteView( textureDdsBlob ),
+			MakeByteView( samplers ),
 		};
 
 		HP_ASSERT( std::size( bufs ) == hellpack_entry_slot::COUNT );
@@ -553,7 +561,7 @@ struct rt_world_data
 	std::vector<gpu_bvh2_node> globalBlasBuffer;
 	std::vector<position_t> globalVertexPosBuffer;
 	std::vector<vertex_attrs> globalPackedVertexBuffer;
-	std::vector<index_t> globalTriangleBuffer;
+	std::vector<u16> globalTriangleBuffer;
 
 	rt_mesh_desc AppendMesh( const packed_mesh& mesh )
 	{
@@ -611,12 +619,6 @@ struct rt_world_data
 	}
 };
 
-inline auto MeshletAabbView( const std::ranges::forward_range auto& meshlets )
-{
-	return meshlets | std::views::transform( 
-		[] ( const auto& m ) { return aabb_t<float3>{ .min = m.aabbMin, .max = m.aabbMax }; } );
-};
-
 inline auto InstanceTlasAabbView( const std::ranges::forward_range auto& instances )
 {
 	return instances | std::views::transform( 
@@ -626,99 +628,116 @@ inline auto InstanceTlasAabbView( const std::ranges::forward_range auto& instanc
 		} );
 };
 
-struct texture_compression_batch
+using dds_texture = std::vector<u8>;
+
+constexpr bc_format_t DxgiToBcFormat( dds::DXGI_FORMAT dxgiFmt )
 {
-	ankerl::unordered_dense::map<u32,u32> imgViewToTexMap;
-	std::vector<bcn_compression_result> bcn;
-
-	std::vector<bcn_compression_job> jobs;
-	u32 size;
-
-	inline void ProcessItem( u32 jobIdx )
+	using namespace dds;
+	switch( dxgiFmt )
 	{
-		const bcn_compression_job& job = jobs[ jobIdx ];
-		bcn_compression_result& result = bcn[ jobIdx ];
+	case DXGI_FORMAT_BC5_TYPELESS:
+	case DXGI_FORMAT_BC5_UNORM:
+	case DXGI_FORMAT_BC5_SNORM:
+		return bc_format_t::BC5_RG;
+
+	case DXGI_FORMAT_BC7_TYPELESS:
+	case DXGI_FORMAT_BC7_UNORM:
+	case DXGI_FORMAT_BC7_UNORM_SRGB:
+		return bc_format_t::BC7_RGBA;
+
+	default:
+		HP_ASSERT( 0 && "Unimplement fmt" );
+		return ( bc_format_t ) 0xFF;
+	}
+}
+
+struct compression_job
+{
+	dds_texture tex;
+	std::span<const u8> src;
+	dds::DXGI_FORMAT fmt;
+	u16 width;
+	u16 height;
+
+	void Execute()
+	{
+		bc_format_t bcnFmt = DxgiToBcFormat( fmt );
 		// NOTE: these allocate memory !
-		result = CompressRGBA8ToBCn( job );
+		bcn_compression_result bcn = CompressRGBA8ToBCn( src, width, height, bcnFmt );
+
+		tex.resize( sizeof( dds::Header ) + std::size( bcn.data ) );
+		dds::write_header( &tex[ 0 ], fmt, width, height );
+		std::memcpy( &tex[ 0 ] + sizeof( dds::Header ), &bcn.data[ 0 ], std::size( bcn.data ) );
 	}
 };
 
-texture_compression_batch 
-PrepareBcnCompressionBatch( std::span<const material_info> materials, std::span<const raw_image_view> imageViews )
-{
-	std::vector<bcn_compression_job> jobs;
-	ankerl::unordered_dense::map<u32,u32> imgViewToTexMap;
+using compression_job_map_t = ankerl::unordered_dense::map<u16, compression_job>;
 
-	auto ProcessImageView = [&] ( u16 idx, bc_format_t fmt )
+inline u64 GetTotalTexutreDataSizeInBytes( const compression_job_map_t& jobMap )
+{
+	u64 byteCount = 0;
+	for( auto& [_, job] : jobMap )
+	{
+		byteCount += std::size( job.tex );
+	}
+
+	return byteCount;
+}
+
+compression_job_map_t
+PrepareBcnCompressionBatch( std::span<const raw_material_info> materials, std::span<const raw_image_view> imageViews )
+{
+	HP_ASSERT( std::size( imageViews ) < u16( INVALID_IDX ) );
+
+	compression_job_map_t jobsMap;
+
+	auto ProcessImageView = [&] ( u16 idx, dds::DXGI_FORMAT fmt )
 	{
 		if( !IsIndexValid( idx ) ) return;
-		if( imgViewToTexMap.find( idx ) != std::cend( imgViewToTexMap ) ) return;
+		if( jobsMap.find( idx ) != std::cend( jobsMap ) ) return;
 
 		const raw_image_view& imgView = imageViews[ idx ];
-		jobs.push_back( bcn_compression_job{
-			.rgba8 = imgView.data, 
-			.width = imgView.metadata.width, 
-			.height = imgView.metadata.height, 
-			.format = fmt
-		} );
-
-		imgViewToTexMap.emplace( idx, std::size( jobs ) - 1 );
+		jobsMap.emplace( idx, compression_job{
+			.src = imgView.data, .fmt = fmt, . width = imgView.metadata.width, .height = imgView.metadata.height } );
 	};
 
-	for( const material_info& material : materials )
+	// NOTE: GLTF conventions
+	for( const raw_material_info& material : materials )
 	{
-		ProcessImageView( material.baseColorIdx, bc_format_t::BC7_RGBA );
-		ProcessImageView( material.normalIdx, bc_format_t::BC5_RG );
-		ProcessImageView( material.metallicRoughnessIdx, bc_format_t::BC7_RGBA );
+		ProcessImageView( material.baseColorIdx, dds::DXGI_FORMAT_BC7_UNORM_SRGB );
+		ProcessImageView( material.normalIdx, dds::DXGI_FORMAT_BC5_UNORM );
+		ProcessImageView( material.metallicRoughnessIdx, dds::DXGI_FORMAT_BC7_UNORM );
 		//ProcessImageView( material.occlusionIdx, bc_format_t::BC7_RGBA );
 		// NOTE: currently not suporting ambient occlusion which must be packed into MR
 		HP_ASSERT( !IsIndexValid( material.occlusionIdx ) );
-		ProcessImageView( material.emissiveIdx, bc_format_t::BC7_RGBA );
+		ProcessImageView( material.emissiveIdx, dds::DXGI_FORMAT_BC7_UNORM_SRGB );
 	}
 
-	u32 batchSize = std::size( jobs );
-	std::vector<bcn_compression_result> bcn( batchSize );
-	return {
-		.imgViewToTexMap = std::move( imgViewToTexMap ),
-		.bcn = std::move( bcn ),
-		.jobs = std::move( jobs ),
-		.size = batchSize
-	};
+	return jobsMap;
 }
 
-// NOTE: RunBatch and Join must always be called in pairs !!!!
-struct batch_executor
+inline void ExecuteJobsParallel( std::vector<std::thread>& threadPool, std::function<void()> func, u64 threadCount )
 {
-	std::vector<std::jthread> threads;
-	std::atomic<u32> jobDoneCounter;
+	HP_ASSERT( std::size( threadPool ) == 0 );
 
-	// NOTE: fetch add will increase past the batchSize
-	void RunBatch( auto& BatchProcessor, u32 workerCount, u32 batchSize ) 
+	for( u64 ti = 0; ti < threadCount; ++ti )
 	{
-		auto WorkerLoop = [this, BatchProcessor, batchSize] ()
-		{
-			for( ;; )
-			{
-				u32 jobIdx = jobDoneCounter.fetch_add( 1, std::memory_order_relaxed );
-				if( jobIdx >= batchSize ) break;
-
-				BatchProcessor( jobIdx );
-			}
-		};
-
-		jobDoneCounter = { 0 };
-		threads.clear();
-		for( u32 ti = 0; ti < workerCount; ++ti )
-		{
-			threads.emplace_back( WorkerLoop );
-		}
+		threadPool.emplace_back( func );
 	}
+}
 
-	void Join()
-	{
-		for( auto& t : threads ) t.join();
-	}
-};
+inline void WaitThreadPoolDone( std::vector<std::thread>& threadPool )
+{
+	for( auto& t : threadPool ) t.join();
+}
+
+template<typename K, typename V>
+inline V MapGetIfExistsElseDefault( const ankerl::unordered_dense::map<K, V>& map, K idx )
+{
+	auto it = map.find( idx );
+	if( it != std::cend( map ) ) return it->second;
+	return {};
+}
 
 inline void WriteFileBinary( const char* path, std::span<const u8> bytes )
 {
@@ -753,13 +772,13 @@ inline auto ReadFileBinary( const char* path )
 
 constexpr bool CHECK_SERIALIZATION_RESULT = true;
 
-struct mesh_desc
+struct raw_mesh_desc
 {
-	float3 aabbMin;
-	float3 aabbMax;
-	u32 baseMeshletOffset;
-	u16 meshletCount;
-	u16 materialIdx;
+	float3	aabbMin;
+	float3	aabbMax;
+	u32		baseMeshletOffset;
+	u16		meshletCount;
+	u16		materialIdx;
 };
 
 int main()
@@ -772,31 +791,40 @@ int main()
 	// TODO: ensure we keep the same indexing as tinygltf provides !!!!
 	std::vector<raw_node> rawNodes = gltf.ProcessNodes();
 	std::vector<raw_mesh> rawMeshes = gltf.ProcessMeshes();
-	std::vector<sampler_config> sampler = gltf.ProcessSamplers();
-	std::vector<material_info> materials = gltf.ProcessMaterials();
+	std::vector<sampler_config> samplers = gltf.ProcessSamplers();
+	std::vector<raw_material_info> rawMaterials = gltf.ProcessMaterials();
 	std::vector<raw_image_view> imageViews = gltf.ProcessImages();
 
-	//texture_compression_batch bcnBatch = PrepareBcnCompressionBatch( materials, imageViews );
-	//
-	//batch_executor batchExec = {};
-	//auto Proc = [&] ( u32 idx ) { bcnBatch.ProcessItem( idx ); };
-	//batchExec.RunBatch( Proc, std::max<u32>( 1, bcnBatch.size / 4 ), bcnBatch.size );
+	compression_job_map_t texBatch = PrepareBcnCompressionBatch( rawMaterials, imageViews );
+
+	std::vector<std::thread> tasks;
+	std::atomic<u32> taskCounter = { 0 };
+
+	auto jobs = texBatch | std::views::values;
+	auto WorkerLoop = [&] ()
+	{
+		u32 currentJobIdx = taskCounter.fetch_add( 1 );
+		if( std::size( texBatch ) <= currentJobIdx ) return;
+
+		jobs[ currentJobIdx ].Execute();
+	};
+
+	ExecuteJobsParallel( tasks, WorkerLoop, std::thread::hardware_concurrency() );
 
 	clustered_world_data worldData = {};
 
 	//bvh_builder bvhBuilder = {};
 
-	std::vector<mesh_desc> meshDesc( std::size( rawMeshes ) );
-	for( u64 mi : std::views::iota( 0u, std::size( rawMeshes ) ) )
+	std::vector<raw_mesh_desc> meshDesc;
+	meshDesc.reserve( std::size( rawMeshes ) );
+	for( raw_mesh& mesh : rawMeshes )
 	{
-		raw_mesh& m = rawMeshes[ mi ];
-
-		if( !std::size( m.tans ) )
+		if( !std::size( mesh.tans ) )
 		{
-			m.tans = ComputeMikkTSpaceTangentsInplace( m );
+			mesh.tans = ComputeMikkTSpaceTangentsInplace( mesh );
 		}
 
-		std::vector<meshlet> meshlets = PackMeshlets( m );
+		std::vector<meshlet> meshlets = PackMeshlets( mesh );
 		auto aabbView = meshlets | std::views::transform( 
 			[] ( const meshlet& m ) { return aabb_t<float3>{.min = m.aabbMin, .max = m.aabbMax }; } );
 
@@ -804,24 +832,23 @@ int main()
 
 		range64 meshletsRange = worldData.AppendMeshlets( meshlets );
 
-		meshDesc[ mi ] = {
+		meshDesc.push_back( {
 			.aabbMin = aabb.min,
 			.aabbMax = aabb.max,
 			.baseMeshletOffset = ( u32 ) meshletsRange.baseOffset,
 			.meshletCount = ( u16 ) meshletsRange.count,
-			.materialIdx = ( u16 ) m.materialIdx
-		};
+			.materialIdx = ( u16 ) mesh.materialIdx
+		} );
 	}
 
-	std::vector<clustered_instance> instances;
-	instances.reserve( std::size( rawNodes ) );
+	worldData.instances.reserve( std::size( rawNodes ) );
 	for( const raw_node& n : rawNodes )
 	{
 		if( INVALID_IDX == n.meshIdx ) continue;
 
-		const mesh_desc& md = meshDesc[ n.meshIdx ];
+		const raw_mesh_desc& md = meshDesc[ n.meshIdx ];
 
-		instances.push_back( {
+		worldData.instances.push_back( {
 			.toWorld = n.toWorld,
 			.aabbMin = md.aabbMin,
 			.aabbMax = md.aabbMax,
@@ -831,7 +858,36 @@ int main()
 		} );
 	}
 
-	worldData.instances = std::move( instances );
+	WaitThreadPoolDone( tasks );
+
+	ankerl::unordered_dense::map<u16, range64> texDataRemap;
+	worldData.textureDdsBlob.reserve( GetTotalTexutreDataSizeInBytes( texBatch ) );
+	for( auto&[ idx, job ] : texBatch )
+	{
+		range64 thisRange = { .baseOffset = std::size( worldData.textureDdsBlob ), .count = std::size( job.tex ) };
+		texDataRemap.emplace( idx, thisRange );
+		std::ranges::copy( job.tex, std::back_inserter( worldData.textureDdsBlob ) );
+	}
+
+	worldData.materials.reserve( std::size( rawMaterials ) );
+	for( const raw_material_info& material : rawMaterials )
+	{
+		worldData.materials.push_back( {
+			.baseColor = MapGetIfExistsElseDefault( texDataRemap, material.baseColorIdx ),
+			.metallicRoughness = MapGetIfExistsElseDefault( texDataRemap, material.metallicRoughnessIdx ),
+			.normal = MapGetIfExistsElseDefault( texDataRemap, material.normalIdx ),
+			.emissive = MapGetIfExistsElseDefault( texDataRemap, material.emissiveIdx ),
+			.baseColFactor = material.baseColFactor,
+			.metallicFactor = material.metallicFactor,
+			.roughnessFactor = material.metallicFactor,
+			.alphaCutoff = material.alphaCutoff,
+			.emissiveFactor = material.emissiveFactor,
+			.samplerIdx = material.samplerIdx,
+			.alphaMode = material.alphaMode
+		} );
+	}
+
+	worldData.samplers = std::move( samplers );
 
 	std::vector<u8> blob = worldData.HellPackSerialize();
 	WriteFileBinary( "D:/3d models/nightclub_futuristic_pub_ambience_asset.hllp", blob );
@@ -844,8 +900,11 @@ int main()
 		byte_view bufs[] = {
 			MakeByteView( worldData.instances ),
 			MakeByteView( worldData.meshletInfoBuffer ),
-			MakeByteView( worldData.globalMeshletVertexBuffer ),
-			MakeByteView( worldData.globalMeshletTriangleBuffer ),
+			MakeByteView( worldData.meshletVertexBuffer ),
+			MakeByteView( worldData.meshletTriangleBuffer ),
+			MakeByteView( worldData.materials ),
+			MakeByteView( worldData.textureDdsBlob ),
+			MakeByteView( worldData.samplers ),
 		};
 
 		for( u64 i : std::views::iota( 0u, hellpack_entry_slot::COUNT ) )

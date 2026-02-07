@@ -81,6 +81,9 @@ enum hellpack_entry_slot : u8
 //	VPOS,
 //	PVTX,
 	TRI,
+	MTRL,
+	TEX,
+	SAMP,
 	COUNT
 };
 
