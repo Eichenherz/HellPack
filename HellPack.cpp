@@ -431,7 +431,6 @@ struct clustered_world_data
 	std::vector<packed_vtx> meshletVertexBuffer;
 	std::vector<index_t> meshletTriangleBuffer;
 	std::vector<material_desc> materials;
-	std::vector<u8> textureDdsBlob;
 	std::vector<sampler_config> samplers;
 
 	range64 AppendMeshlets( const std::ranges::forward_range auto& meshlets )
@@ -486,7 +485,6 @@ struct clustered_world_data
 			{ meshletVertexBuffer, hellpack_entry_type::VTX },
 			{ meshletTriangleBuffer, hellpack_entry_type::TRI },
 			{ materials, hellpack_entry_type::MTRL },
-			{ textureDdsBlob, hellpack_entry_type::TEX },
 			{ samplers, hellpack_entry_type::SAMP },
 		};
 
@@ -666,6 +664,7 @@ constexpr bc_format_t DxgiToBcFormat( dds::DXGI_FORMAT dxgiFmt )
 
 struct compression_job
 {
+	alignas( 8 ) tex_path filename;
 	dds_texture tex;
 	std::span<const u8> src;
 	dds::DXGI_FORMAT fmt;
@@ -697,6 +696,17 @@ inline u64 GetTotalTexutreDataSizeInBytes( const compression_job_map_t& jobMap )
 	return byteCount;
 }
 
+inline tex_path MakeTexPath( const std::string& str )
+{
+	tex_path texPath;
+	HP_ASSERT( std::size( str ) + 1 /*for \0*/ <= std::size( texPath ) );
+
+	std::ranges::fill( texPath, '\0' );
+	std::ranges::copy( str, std::begin( texPath ) );
+
+	return texPath;
+}
+
 compression_job_map_t
 PrepareBcnCompressionBatch( std::span<const raw_material_info> materials, std::span<const raw_image_view> imageViews )
 {
@@ -704,39 +714,37 @@ PrepareBcnCompressionBatch( std::span<const raw_material_info> materials, std::s
 
 	compression_job_map_t jobsMap;
 
-	auto ProcessImageView = [&] ( u16 idx, dds::DXGI_FORMAT fmt )
+	auto ProcessImageView = [&] ( u16 idx, dds::DXGI_FORMAT fmt, const tex_path& filename )
 	{
 		if( !IsIndexValid( idx ) ) return;
 		if( jobsMap.find( idx ) != std::cend( jobsMap ) ) return;
 
 		const raw_image_view& imgView = imageViews[ idx ];
-		jobsMap.emplace( idx, compression_job{
-			.src = imgView.data, .fmt = fmt, . width = imgView.metadata.width, .height = imgView.metadata.height } );
+		HP_ASSERT( std::size( imgView.data ) );
+
+		compression_job job = {
+			.filename = filename,
+			.src = imgView.data, 
+			.fmt = fmt, 
+			.width = imgView.metadata.width, 
+			.height = imgView.metadata.height 
+		};
+		jobsMap.emplace( idx, job );
 	};
 
 	// NOTE: GLTF conventions
-	for( const raw_material_info& material : materials )
+	for( const raw_material_info& mtrl : materials )
 	{
-		ProcessImageView( material.baseColorIdx, dds::DXGI_FORMAT_BC7_UNORM_SRGB );
-		ProcessImageView( material.normalIdx, dds::DXGI_FORMAT_BC5_UNORM );
-		ProcessImageView( material.metallicRoughnessIdx, dds::DXGI_FORMAT_BC7_UNORM );
+		ProcessImageView( mtrl.baseColorIdx, dds::DXGI_FORMAT_BC7_UNORM_SRGB, MakeTexPath( mtrl.name + "_albedo.dds" ) );
+		ProcessImageView( mtrl.normalIdx, dds::DXGI_FORMAT_BC5_UNORM, MakeTexPath( mtrl.name + "_normal.dds" ) );
+		ProcessImageView( mtrl.metallicRoughnessIdx, dds::DXGI_FORMAT_BC7_UNORM, MakeTexPath( mtrl.name + "_mro.dds" ) );
 		//ProcessImageView( material.occlusionIdx, bc_format_t::BC7_RGBA );
 		// NOTE: currently not suporting ambient occlusion which must be packed into MR
-		HP_ASSERT( !IsIndexValid( material.occlusionIdx ) );
-		ProcessImageView( material.emissiveIdx, dds::DXGI_FORMAT_BC7_UNORM_SRGB );
+		HP_ASSERT( !IsIndexValid( mtrl.occlusionIdx ) );
+		ProcessImageView( mtrl.emissiveIdx, dds::DXGI_FORMAT_BC7_UNORM_SRGB, MakeTexPath( mtrl.name + "_emissive.dds" ) );
 	}
 
 	return jobsMap;
-}
-
-inline void ExecuteJobsParallel( std::vector<std::thread>& threadPool, std::function<void()> func, u64 threadCount )
-{
-	HP_ASSERT( std::size( threadPool ) == 0 );
-
-	for( u64 ti = 0; ti < threadCount; ++ti )
-	{
-		threadPool.emplace_back( func );
-	}
 }
 
 inline void WaitThreadPoolDone( std::vector<std::thread>& threadPool )
@@ -744,11 +752,11 @@ inline void WaitThreadPoolDone( std::vector<std::thread>& threadPool )
 	for( auto& t : threadPool ) t.join();
 }
 
-template<typename K, typename V>
-inline V MapGetIfExistsElseDefault( const ankerl::unordered_dense::map<K, V>& map, K idx )
+
+inline tex_path MapGetIfExistsElseDefault( const compression_job_map_t& map, u16 idx )
 {
 	auto it = map.find( idx );
-	if( it != std::cend( map ) ) return it->second;
+	if( it != std::cend( map ) ) return it->second.filename;
 	return {};
 }
 
@@ -765,7 +773,8 @@ struct raw_mesh_desc
 
 int main()
 {
-	const std::string gltfFilePath = "D:/3d models/nightclub_futuristic_pub_ambience_asset.glb";
+	const std::string gltfFilePath = "D:/3d models/Nightclub Futuristic/nightclub_futuristic_pub_ambience_asset.glb";
+
 	HP_ASSERT( fs::exists( gltfFilePath ) );
 
 	gltf_loader gltf = { gltfFilePath };
@@ -785,13 +794,16 @@ int main()
 	auto jobs = texBatch | std::views::values;
 	auto WorkerLoop = [&] ()
 	{
-		u32 currentJobIdx = taskCounter.fetch_add( 1 );
-		if( std::size( texBatch ) <= currentJobIdx ) return;
+		for( ;; )
+		{
+			u32 currentJobIdx = taskCounter.fetch_add( 1 );
+			if( currentJobIdx >= std::size( texBatch ) ) return;
 
-		jobs[ currentJobIdx ].Execute();
+			jobs[ currentJobIdx ].Execute();
+		}
 	};
 
-	ExecuteJobsParallel( tasks, WorkerLoop, std::thread::hardware_concurrency() );
+	for( u64 ti = 0; ti < std::thread::hardware_concurrency(); ++ti ) tasks.emplace_back( WorkerLoop );
 
 	clustered_world_data worldData = {};
 
@@ -840,23 +852,21 @@ int main()
 
 	WaitThreadPoolDone( tasks );
 
-	ankerl::unordered_dense::map<u16, range64> texDataRemap;
-	worldData.textureDdsBlob.reserve( GetTotalTexutreDataSizeInBytes( texBatch ) );
-	for( auto&[ idx, job ] : texBatch )
+	const fs::path parentDir = fs::path( gltfFilePath ).parent_path();
+	for( const auto&[ idx, job ] : texBatch )
 	{
-		range64 thisRange = { .baseOffset = std::size( worldData.textureDdsBlob ), .count = std::size( job.tex ) };
-		texDataRemap.emplace( idx, thisRange );
-		std::ranges::copy( job.tex, std::back_inserter( worldData.textureDdsBlob ) );
+		HP_ASSERT( std::size( job.tex ) );
+		WriteFileBinary( ( parentDir / std::data( job.filename ) ).string().c_str(), job.tex );
 	}
 
 	worldData.materials.reserve( std::size( rawMaterials ) );
 	for( const raw_material_info& material : rawMaterials )
 	{
 		worldData.materials.push_back( {
-			.baseColor = MapGetIfExistsElseDefault( texDataRemap, material.baseColorIdx ),
-			.metallicRoughness = MapGetIfExistsElseDefault( texDataRemap, material.metallicRoughnessIdx ),
-			.normal = MapGetIfExistsElseDefault( texDataRemap, material.normalIdx ),
-			.emissive = MapGetIfExistsElseDefault( texDataRemap, material.emissiveIdx ),
+			.baseColor = MapGetIfExistsElseDefault( texBatch, material.baseColorIdx ),
+			.metallicRoughness = MapGetIfExistsElseDefault( texBatch, material.metallicRoughnessIdx ),
+			.normal = MapGetIfExistsElseDefault( texBatch, material.normalIdx ),
+			.emissive = MapGetIfExistsElseDefault( texBatch, material.emissiveIdx ),
 			.baseColFactor = material.baseColFactor,
 			.metallicFactor = material.metallicFactor,
 			.roughnessFactor = material.metallicFactor,
@@ -870,11 +880,11 @@ int main()
 	worldData.samplers = std::move( samplers );
 
 	std::vector<u8> blob = worldData.HellPackSerialize();
-	WriteFileBinary( "D:/3d models/nightclub_futuristic_pub_ambience_asset.hllp", blob );
+	WriteFileBinary( "D:/3d models/Nightclub Futuristic/nightclub_futuristic_pub_ambience_asset.hllp", blob );
 
 	if constexpr( CHECK_SERIALIZATION_RESULT )
 	{
-		auto blob = ReadFileBinary( "D:/3d models/nightclub_futuristic_pub_ambience_asset.hllp" );
+		auto blob = ReadFileBinary( "D:/3d models/Nightclub Futuristic/nightclub_futuristic_pub_ambience_asset.hllp" );
 
 		hellpack_view hellpackView = { blob };
 
@@ -884,7 +894,6 @@ int main()
 			{ worldData.meshletVertexBuffer, hellpack_entry_type::VTX },
 			{ worldData.meshletTriangleBuffer, hellpack_entry_type::TRI },
 			{ worldData.materials, hellpack_entry_type::MTRL },
-			{ worldData.textureDdsBlob, hellpack_entry_type::TEX },
 			{ worldData.samplers, hellpack_entry_type::SAMP },
 		};
 

@@ -69,6 +69,30 @@ struct packed_mesh
 	u16 materialIdx;
 };
 
+struct raw_material_info
+{
+	std::string name;
 
+	float4 baseColFactor;
+	float metallicFactor;
+	float roughnessFactor;
+	float alphaCutoff;
+	float3 emissiveFactor;
+
+	u16 baseColorIdx;
+	u16 metallicRoughnessIdx;
+	u16 normalIdx;
+	u16 occlusionIdx;
+	u16 emissiveIdx;
+	u16 samplerIdx;
+
+	alpha_mode alphaMode;
+};
+
+struct range64
+{
+	u64 baseOffset : 32;
+	u64 count : 32;
+};
 
 #endif // !__HP_TYPES_INTERNAL_H__

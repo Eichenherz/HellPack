@@ -2,31 +2,12 @@
 #define __HP_MATERIAL_H__
 
 #include "core_types.h"
-#include "hp_math.h"
 
 enum alpha_mode : u8
 {
 	ALPHA_MODE_OPAQUE,
 	ALPHA_MODE_MASK,
 	ALPHA_MODE_BLEND,
-};
-
-struct raw_material_info
-{
-	float4 baseColFactor;
-	float metallicFactor;
-	float roughnessFactor;
-	float alphaCutoff;
-	float3 emissiveFactor;
-
-	u16 baseColorIdx;
-	u16 metallicRoughnessIdx;
-	u16 normalIdx;
-	u16 occlusionIdx;
-	u16 emissiveIdx;
-	u16 samplerIdx;
-
-	alpha_mode alphaMode;
 };
 
 enum sampler_filter_mode_flags : u8
@@ -73,12 +54,15 @@ constexpr sampler_config DEFAULT_SAMPLER = {
 	.wrapModeT = sampler_wrap_mode_flags::WRAP_REPEAT
 };
 
+// NOTE: always relative to the main file
+using tex_path = std::array<char, 128>;
+
 struct material_desc
 {
-	range64 baseColor;
-	range64 metallicRoughness;
-	range64 normal;
-	range64 emissive;
+	alignas( 8 ) tex_path baseColor;
+	alignas( 8 ) tex_path metallicRoughness;
+	alignas( 8 ) tex_path normal;
+	alignas( 8 ) tex_path emissive;
 
 	float4 baseColFactor;
 	float metallicFactor;

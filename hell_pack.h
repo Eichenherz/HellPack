@@ -31,7 +31,6 @@ enum hellpack_entry_type : u8
 	//	PVTX,
 	TRI,
 	MTRL,
-	TEX,
 	SAMP,
 	COUNT
 };

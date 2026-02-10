@@ -456,17 +456,21 @@ struct gltf_loader
 		std::vector<raw_material_info> materialsOut;
 		materialsOut.reserve( std::size( model.materials ) );
 
-		for( const tinygltf::Material& material : model.materials )
+		for( u64 mi = 0; mi < std::size( model.materials ); ++mi )
 		{
+			const tinygltf::Material& material = model.materials[ mi ];
 			const tinygltf::PbrMetallicRoughness& pbrInfo = material.pbrMetallicRoughness;
 
+			std::string materialName = ( std::size( material.name ) ) ? material.name.c_str() : std::format( "mtrl_{}", mi );
+
 			raw_material_info metadata = {
+				.name = std::move( materialName ),
 				.baseColFactor = {
 					( float ) pbrInfo.baseColorFactor[ 0 ],
 					( float ) pbrInfo.baseColorFactor[ 1 ],
 					( float ) pbrInfo.baseColorFactor[ 2 ],
 					( float ) pbrInfo.baseColorFactor[ 3 ]
-			},
+			    },
 				.metallicFactor = ( float ) pbrInfo.metallicFactor,
 				.roughnessFactor = ( float ) pbrInfo.roughnessFactor,
 				.alphaCutoff = ( float ) material.alphaCutoff,
@@ -474,7 +478,7 @@ struct gltf_loader
 					( float ) material.emissiveFactor[ 0 ],
 					( float ) material.emissiveFactor[ 1 ],
 					( float ) material.emissiveFactor[ 2 ]
-			},
+			    },
 				.alphaMode = GltfAlphaModeToEnum( material.alphaMode )
 			};
 

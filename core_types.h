@@ -13,12 +13,6 @@ using i16 = int16_t;
 using i32 = int32_t;
 using i64 = int64_t;
 
-struct range64
-{
-	u64 baseOffset : 32;
-	u64 count : 32;
-};
-
 constexpr i32 INVALID_IDX = -1;
 
 template<typename T>
