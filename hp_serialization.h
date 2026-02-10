@@ -3,188 +3,111 @@
 
 #include "core_types.h"
 #include "hp_error.h"
+#include "hp_math.h"
+#include "range_utils.h"
+
+#include "hell_pack.h"
 
 #include <span>
 #include <algorithm>
-#include <ranges>
-
-constexpr u32 HELLPACK_VERSION = 1;
-constexpr u64 HELLPACK_MAGIC =
-	( u64( 'H' ) )       |
-	( u64( 'E' ) << 8 )  |
-	( u64( 'L' ) << 16 ) |
-	( u64( 'L' ) << 24 ) |
-	( u64( 'P' ) << 32 ) |
-	( u64( 'A' ) << 40 ) |
-	( u64( 'C' ) << 48 ) |
-	( u64( 'K' ) << 56 );
 
 constexpr u64 GPU_BUFFER_ALIGNEMNT = 64;
 
-inline u64 AlignUp( u64 x, u64 a ) { return ( x + ( a - 1 ) ) & ~( a - 1 ); }
+using index_t = u8;
 
-struct byte_range_t
+struct hellpack_serializble_buffer
 {
-	u64 baseOffset;
-	u64 count;
+	const byte_view data;
+	hellpack_entry_type typeOf;
+
+	template<typename T>
+	inline hellpack_serializble_buffer( const std::vector<T>& data, hellpack_entry_type typeOf ) 
+		: data{ MakeByteView( data ) } , typeOf{ typeOf } {}
 };
 
-template<typename T>
-struct typed_view
+using hellpack_blob = std::vector<u8>;
+
+inline hellpack_blob MakeHellpackBlob( std::span<const hellpack_serializble_buffer> bufs )
 {
-	const T* ptr = nullptr;
-	u32 count = 0;
+	const u32 entriesCount = std::size( bufs );
+	// NOTE: since we use SoA layout we shouldn't have more than 1 buffer per entry
+	HP_ASSERT( entriesCount <= ( u32 ) hellpack_entry_type::COUNT );
 
-	constexpr const T* data()  const { return ptr; }
-	constexpr u32      size()  const { return count; }
-	constexpr const T* begin() const { return ptr; }
-	constexpr const T* end()   const { return ptr + count; }
-	constexpr std::span<const T> span() const { return { ptr, ( u64 ) count }; }
-	constexpr const T& operator[](u32 i) const noexcept
-	{
-		assert( i < count );
-		return ptr[ i ];
-	}
-};
-
-using byte_view = typed_view<u8>;
-
-template<typename T>
-static inline byte_view AsBytes( typed_view<T> v )
-{
-	static_assert( std::is_trivially_copyable_v<T> );
-	return { ( const u8* ) std::data( v ), ( u32 ) std::size( v ) * sizeof( T ) };
-}
-
-template<typename T>
-inline typed_view<T> MakeTypedView( std::span<const T> s )
-{
-	return { std::data( s ), ( u32 ) std::size( s ) };
-}
-
-template<std::ranges::contiguous_range R>
-inline byte_view MakeByteView( const R& r )
-{
-	using T = std::ranges::range_value_t<R>;
-
-	static_assert( std::is_trivially_copyable_v<T> );
-	return { ( const u8* ) std::data( r ), ( u32 ) std::size( r ) * sizeof( T ) };
-}
-
-enum hellpack_entry_slot : u8
-{
-	INST = 0,
-//	TLAS,
-//	BLAS,
-	MLET,
-	VTX,
-//	VPOS,
-//	PVTX,
-	TRI,
-	MTRL,
-	TEX,
-	SAMP,
-	COUNT
-};
-
-#pragma pack(push, 1)
-struct hellpack_blob_header
-{
-	u64 magic;
-	u32 version;
-	u32 pad0;
-	u64 fileSizeBytes;
-
-	byte_range_t ranges[ hellpack_entry_slot::COUNT ];
-};
-#pragma pack(pop)
-
-static_assert( sizeof( hellpack_blob_header ) % 8 == 0 );
-
-inline auto MakeHellpackBlob( std::span<const byte_view> bufs )
-{
 	hellpack_blob_header h = {
 		.magic = HELLPACK_MAGIC,
-		.version = HELLPACK_VERSION
+		.version = HELLPACK_VERSION,
+		.entriesCount = entriesCount,
 	};
 
-	u64 cursor = AlignUp( sizeof( hellpack_blob_header ), GPU_BUFFER_ALIGNEMNT );
+	h.entryTableOffsetInBytes = sizeof( h ); // NOTE: for now we place the table right after the header
 
-	for( u64 i : std::views::iota( 0u, std::size( bufs ) ) ) 
+	std::vector<hellpack_entry> entryTable( entriesCount );
+	const u64 entriesTableSizeInBytes = std::size( entryTable ) * sizeof( entryTable[ 0 ] );
+
+	u64 cursor = h.entryTableOffsetInBytes + entriesTableSizeInBytes;
+
+	for( u64 ei = 0; ei < entriesCount; ++ei ) 
 	{
 		cursor = AlignUp( cursor, GPU_BUFFER_ALIGNEMNT );
 
-		u64 thisBuffSize = std::size( bufs[ i ] );
-		h.ranges[ i ] = { .baseOffset = cursor, .count = thisBuffSize };
+		u64 thisBuffSizeInBytes = std::size( bufs[ ei ].data );
+		entryTable[ ei ] = { 
+			.offsetInBytes = cursor, .byteCount = thisBuffSizeInBytes, .typeOf = bufs[ ei ].typeOf };
 
-		cursor += thisBuffSize;
+		cursor += thisBuffSizeInBytes;
 	}
 	cursor = AlignUp( cursor, GPU_BUFFER_ALIGNEMNT );
 
 	h.fileSizeBytes = cursor;
 
 	// NOTE: pad to zero automatically
-	std::vector<u8> blob( h.fileSizeBytes, 0 );
+	hellpack_blob blob( h.fileSizeBytes, 0 );
 	std::memcpy( std::data( blob ), &h, sizeof( h ) );
+	std::memcpy( std::data( blob ) + h.entryTableOffsetInBytes, std::data( entryTable ), entriesTableSizeInBytes );
 
-	auto MemcpyLambda = [&] ( u64 i )
+	for( u64 ei = 0; ei < entriesCount; ++ei )
 	{
-		const u64 offset = h.ranges[ i ].baseOffset;
-		const u64 size = h.ranges[ i ].count;
+		const u64 offset = entryTable[ ei ].offsetInBytes;
+		const u64 size = entryTable[ ei ].byteCount;
 
 		HP_ASSERT( offset + size <= std::size( blob ) );
-
-		if( size )
-		{
-			std::memcpy( std::data( blob ) + offset, std::data( bufs[ i ] ), size );
-		}
-	};
-	std::ranges::for_each( std::views::iota( 0u, std::size( bufs ) ), MemcpyLambda );
+		// NOTE: even if we can handle size == 0, there might be an external issue that results in a 0 sized buffer
+		HP_ASSERT( 0 != size );
+		std::memcpy( std::data( blob ) + offset, std::data( bufs[ ei ].data ), size );
+	}
 
 	return blob;
 }
 
-struct hellpack_view
+inline void WriteFileBinary( const char* path, std::span<const u8> bytes )
 {
-	const u8* base;
-	u64 sizeInBytes;
-	const hellpack_blob_header* h;
+	FILE* f = nullptr;
+	HP_ASSERT( ::fopen_s( &f, path, "wb" ) == 0 );
 
-	hellpack_view( std::span<const u8> blob )
-	{
-		HP_ASSERT( std::size( blob ) >= sizeof( hellpack_blob_header ) );
+	u64 written = ::fwrite( std::data( bytes ), 1, std::size( bytes ), f );
+	HP_ASSERT( std::size( bytes ) == written );
 
-		base = std::data( blob );
-		sizeInBytes = std::size( blob );
-		h = ( const hellpack_blob_header* ) ( base );
+	i32 rc = ::fclose( f );
+	HP_ASSERT( rc == 0 );
+}
 
-		HP_ASSERT( h->magic == HELLPACK_MAGIC );
-		HP_ASSERT( h->version == HELLPACK_VERSION );
-		HP_ASSERT( h->fileSizeBytes == sizeInBytes );
-	}
+inline std::vector<u8> ReadFileBinary( const char* path )
+{
+	FILE* f = nullptr;
+	HP_ASSERT( ::fopen_s( &f, path, "rb" ) == 0 );
+	HP_ASSERT( f );
 
-	byte_view Bytes( hellpack_entry_slot s ) const
-	{
-		const u64 offset = h->ranges[ s ].baseOffset;
-		const u64 size = h->ranges[ s ].count;
+	HP_ASSERT( ::fseek( f, 0, SEEK_END ) == 0 );
+	i32 sz = ::ftell( f );
+	HP_ASSERT( sz >= 0 );
+	HP_ASSERT( ::fseek( f, 0, SEEK_SET ) == 0 );
 
-		HP_ASSERT( offset + size <= sizeInBytes );
+	std::vector<u8> out( sz );
+	u64 read = ::fread( std::data( out ), 1, std::size( out ), f );
+	HP_ASSERT( std::size( out ) == read );
 
-		return { base + offset, ( u32 ) size };
-	}
-
-	template<typename T>
-	typed_view<T> Typed( hellpack_entry_slot s ) const
-	{
-		const u64 offset = h->ranges[ s ].baseOffset;
-		const u64 size = h->ranges[ s ].count;
-
-		HP_ASSERT( offset % alignof( T ) == 0 );
-		HP_ASSERT( offset + size <= sizeInBytes );
-		HP_ASSERT( ( size % sizeof( T ) ) == 0 );
-
-		return { ( const T* ) ( base + offset ), ( u32 ) ( size / sizeof( T ) ) };
-	}
-};
+	HP_ASSERT( ::fclose( f ) == 0 );
+	return out;
+}
 
 #endif // !__HP_SERIALIZATION_H__

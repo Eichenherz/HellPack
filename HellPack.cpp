@@ -15,6 +15,8 @@ namespace fs = std::filesystem;
 #include "core_types.h"
 #include "hp_error.h"
 
+#include "hell_pack.h"
+
 // NOTE/TODO: float types are fwd def in mesh to be shared ! must use an internal folder or smth for math
 #include "hp_math.h"
 #include "hp_mesh.h"
@@ -31,6 +33,32 @@ namespace fs = std::filesystem;
 #include "gltf_loader.h"
 
 #include "hp_types_internal.h"
+
+raw_mesh ValidateAndNormalizeRawMesh( const raw_mesh& inRawMesh )
+{
+	HP_ASSERT( std::size( inRawMesh.indices ) != 0 );
+	HP_ASSERT( ( std::size( inRawMesh.indices ) % 3 ) == 0 );
+	auto it = std::ranges::max_element( inRawMesh.indices );
+	HP_ASSERT( *it <= u16( -1 ) );
+	HP_ASSERT( inRawMesh.materialIdx <= i32( u16( -1 ) ) );
+
+	raw_mesh outRawMesh = {
+		.name = std::move( inRawMesh.name ),
+		.pos = std::move( inRawMesh.pos ),
+		.normals = std::move( inRawMesh.normals ),
+		.tans = std::move( inRawMesh.tans ),
+		.uvs = std::move( inRawMesh.uvs ),
+		.indices = std::move( inRawMesh.indices ),
+		.materialIdx = inRawMesh.materialIdx
+	};
+
+	if( !std::size( outRawMesh.tans ) )
+	{
+		outRawMesh.tans = ComputeMikkTSpaceTangentsInplace( inRawMesh );
+	}
+
+	return outRawMesh;
+}
 
 struct meshlet_config
 {
@@ -326,14 +354,6 @@ std::vector<vertex_attrs> PackVertexAttributes(
 	return packedAttrs;
 }
 
-void ValidateRawMeshAssumptions( const raw_mesh& rawMesh )
-{
-	auto it = std::ranges::max_element( rawMesh.indices );
-	HP_ASSERT( it != std::cend( rawMesh.indices ) );
-	HP_ASSERT( *it <= u16( -1 ) );
-	HP_ASSERT( rawMesh.materialIdx <= i32( u16( -1 ) ) );
-}
-
 packed_mesh PackMesh( const raw_mesh& rawMesh, bvh_builder& bvhBuilder )
 {
 	std::vector<vertex_attrs> packedAttrs;
@@ -403,7 +423,6 @@ packed_mesh PackMesh( const raw_mesh& rawMesh, bvh_builder& bvhBuilder )
 }
 
 using position_t = float3;
-using index_t = u8;
 
 struct clustered_world_data
 {
@@ -461,163 +480,157 @@ struct clustered_world_data
 
 	inline std::vector<u8> HellPackSerialize()
 	{
-		byte_view bufs[] = {
-			MakeByteView( instances ),
-			MakeByteView( meshletInfoBuffer ),
-			MakeByteView( meshletVertexBuffer ),
-			MakeByteView( meshletTriangleBuffer ),
-			MakeByteView( materials ),
-			MakeByteView( textureDdsBlob ),
-			MakeByteView( samplers ),
+		hellpack_serializble_buffer bufs[] = {
+			{ instances, hellpack_entry_type::INST },
+			{ meshletInfoBuffer, hellpack_entry_type::MLET },
+			{ meshletVertexBuffer, hellpack_entry_type::VTX },
+			{ meshletTriangleBuffer, hellpack_entry_type::TRI },
+			{ materials, hellpack_entry_type::MTRL },
+			{ textureDdsBlob, hellpack_entry_type::TEX },
+			{ samplers, hellpack_entry_type::SAMP },
 		};
-
-		HP_ASSERT( std::size( bufs ) == hellpack_entry_slot::COUNT );
 
 		return MakeHellpackBlob( bufs );
 	}
 };
 
-struct rt_clustered_world_data
-{
-	std::vector<rt_clustered_instance> instances;
-	std::vector<gpu_bvh2_node> globalTlasBuffer;
-	std::vector<gpu_bvh2_node> globalClasBuffer;
-	std::vector<meshlet_info> meshletInfoBuffer;
-	std::vector<position_t> globalVertexPosBuffer;
-	std::vector<vertex_attrs> globalPackedVertexBuffer;
-	std::vector<u8> globalTriangleBuffer;
-
-	range64 AppendMeshlets( const std::ranges::forward_range auto& meshlets )
-	{
-		HP_ASSERT( std::size( globalVertexPosBuffer ) == std::size( globalPackedVertexBuffer ) );
-		HP_ASSERT( std::size( globalVertexPosBuffer ) < u32( -1 ) );
-		HP_ASSERT( std::size( globalTriangleBuffer ) < u32( -1 ) );
-		HP_ASSERT( std::size( globalClasBuffer ) < u32( -1 ) );
-
-		u64 totalVertexCount = 0;
-		u64 totalTrianlgeCount = 0;
-		for( const rt_cluster& m : meshlets )
-		{
-			const u64 vertexCount = std::size( m.positions );
-			const u64 triangleCount = std::size( m.triangles );
-
-			HP_ASSERT( vertexCount == std::size( m.packedAttrs ) );
-			HP_ASSERT( ( vertexCount <= u8( -1 ) ) && ( triangleCount <= u8( -1 ) ) );
-
-			totalVertexCount += vertexCount;
-			totalTrianlgeCount += triangleCount;
-		}
-		globalVertexPosBuffer.reserve( std::size( globalVertexPosBuffer ) + totalVertexCount );
-		globalPackedVertexBuffer.reserve( std::size( globalPackedVertexBuffer ) + totalVertexCount );
-		globalTriangleBuffer.reserve( std::size( globalTriangleBuffer ) + totalTrianlgeCount );
-
-		HP_ASSERT( std::size( meshletInfoBuffer ) <= u32( -1 ) );
-		const u32 baseMeshletOffset = ( u32 ) std::size( meshletInfoBuffer );
-		meshletInfoBuffer.reserve( baseMeshletOffset + std::size( meshlets ) );
-
-		for( const rt_cluster& m : meshlets )
-		{
-			meshlet_info info = {
-				.aabbMin = m.aabbMin,
-				.aabbMax = m.aabbMax,
-				.vertexOffset = ( u32 ) std::size( globalVertexPosBuffer ),
-				.triangleOffset = ( u32 ) std::size( globalTriangleBuffer ),
-				.vertexCount = ( u8 ) std::size( m.positions ),
-				.triangleCount = ( u8 ) std::size( m.triangles )
-			};
-
-			std::ranges::copy( m.positions, std::back_inserter( globalVertexPosBuffer ) );
-			std::ranges::copy( m.packedAttrs, std::back_inserter( globalPackedVertexBuffer ) );
-			std::ranges::copy( m.triangles, std::back_inserter( globalTriangleBuffer ) );
-			meshletInfoBuffer.push_back( info );
-		}
-
-		HP_ASSERT( std::size( meshlets ) <= u32( -1 ) );
-		return { .baseOffset = baseMeshletOffset, .count = ( u32 ) std::size( meshlets ) };
-	}
-
-	inline std::vector<u8> HellPackSerialize()
-	{
-		byte_view bufs[] = {
-			MakeByteView( instances ),
-			MakeByteView( globalTlasBuffer ),
-			MakeByteView( globalClasBuffer ),
-			MakeByteView( meshletInfoBuffer ),
-			MakeByteView( globalVertexPosBuffer ),
-			MakeByteView( globalPackedVertexBuffer ),
-			MakeByteView( globalTriangleBuffer ),
-		};
-
-		HP_ASSERT( std::size( bufs ) == hellpack_entry_slot::COUNT );
-
-		return MakeHellpackBlob( bufs );
-	}
-};
-
-struct rt_world_data
-{
-	std::vector<mesh_instance> instances;
-	std::vector<gpu_bvh2_node> globalTlasBuffer;
-	std::vector<gpu_bvh2_node> globalBlasBuffer;
-	std::vector<position_t> globalVertexPosBuffer;
-	std::vector<vertex_attrs> globalPackedVertexBuffer;
-	std::vector<u16> globalTriangleBuffer;
-
-	rt_mesh_desc AppendMesh( const packed_mesh& mesh )
-	{
-		HP_ASSERT( std::size( globalVertexPosBuffer ) == std::size( globalPackedVertexBuffer ) );
-		HP_ASSERT( std::size( globalVertexPosBuffer ) < u32( -1 ) );
-		HP_ASSERT( std::size( globalTriangleBuffer ) < u32( -1 ) );
-		HP_ASSERT( std::size( globalBlasBuffer ) < u32( -1 ) );
-
-		HP_ASSERT( std::size( mesh.blas ) < u16( -1 ) );
-		HP_ASSERT( std::size( mesh.positions ) < u16( -1 ) );
-		HP_ASSERT( std::size( mesh.indices ) < u16( -1 ) );
-
-		u32 baseBvhNodeOffset = std::size( globalBlasBuffer );
-		u32 baseVertexOffset = std::size( globalVertexPosBuffer );
-		u32 baseIndexOffset = std::size( globalTriangleBuffer );
-
-		u16 blasNodeCount = std::size( mesh.blas );
-		u16 vertexCount = std::size( mesh.positions );
-		u16 indexCount = std::size( mesh.indices );
-
-		globalBlasBuffer.reserve( baseBvhNodeOffset + blasNodeCount );
-		globalVertexPosBuffer.reserve( baseVertexOffset + vertexCount );
-		globalPackedVertexBuffer.reserve( baseVertexOffset + vertexCount );
-		globalTriangleBuffer.reserve( baseIndexOffset + indexCount );
-
-		std::ranges::copy( mesh.blas, std::back_inserter( globalBlasBuffer ) );
-		std::ranges::copy( mesh.positions, std::back_inserter( globalVertexPosBuffer ) );
-		std::ranges::copy( mesh.attrs, std::back_inserter( globalPackedVertexBuffer ) );
-		std::ranges::copy( mesh.indices, std::back_inserter( globalTriangleBuffer ) );
-
-		return { 
-			.bvhRoot = baseBvhNodeOffset,
-			.baseVertexOffset = baseVertexOffset,
-			.baseIndexOffset = baseIndexOffset,
-			.bvhNodeCount = blasNodeCount,
-			.vertexCount = vertexCount,
-			.indexCount = indexCount
-		};
-	}
-
-	inline std::vector<u8> HellPackSerialize()
-	{
-		byte_view bufs[] = {
-			MakeByteView( instances ),
-			MakeByteView( globalTlasBuffer ),
-			MakeByteView( globalBlasBuffer ),
-			MakeByteView( globalVertexPosBuffer ),
-			MakeByteView( globalPackedVertexBuffer ),
-			MakeByteView( globalTriangleBuffer ),
-		};
-
-		HP_ASSERT( std::size( bufs ) == hellpack_entry_slot::COUNT );
-
-		return MakeHellpackBlob( bufs );
-	}
-};
+//struct rt_clustered_world_data
+//{
+//	std::vector<rt_clustered_instance> instances;
+//	std::vector<gpu_bvh2_node> globalTlasBuffer;
+//	std::vector<gpu_bvh2_node> globalClasBuffer;
+//	std::vector<meshlet_info> meshletInfoBuffer;
+//	std::vector<position_t> globalVertexPosBuffer;
+//	std::vector<vertex_attrs> globalPackedVertexBuffer;
+//	std::vector<u8> globalTriangleBuffer;
+//
+//	range64 AppendMeshlets( const std::ranges::forward_range auto& meshlets )
+//	{
+//		HP_ASSERT( std::size( globalVertexPosBuffer ) == std::size( globalPackedVertexBuffer ) );
+//		HP_ASSERT( std::size( globalVertexPosBuffer ) < u32( -1 ) );
+//		HP_ASSERT( std::size( globalTriangleBuffer ) < u32( -1 ) );
+//		HP_ASSERT( std::size( globalClasBuffer ) < u32( -1 ) );
+//
+//		u64 totalVertexCount = 0;
+//		u64 totalTrianlgeCount = 0;
+//		for( const rt_cluster& m : meshlets )
+//		{
+//			const u64 vertexCount = std::size( m.positions );
+//			const u64 triangleCount = std::size( m.triangles );
+//
+//			HP_ASSERT( vertexCount == std::size( m.packedAttrs ) );
+//			HP_ASSERT( ( vertexCount <= u8( -1 ) ) && ( triangleCount <= u8( -1 ) ) );
+//
+//			totalVertexCount += vertexCount;
+//			totalTrianlgeCount += triangleCount;
+//		}
+//		globalVertexPosBuffer.reserve( std::size( globalVertexPosBuffer ) + totalVertexCount );
+//		globalPackedVertexBuffer.reserve( std::size( globalPackedVertexBuffer ) + totalVertexCount );
+//		globalTriangleBuffer.reserve( std::size( globalTriangleBuffer ) + totalTrianlgeCount );
+//
+//		HP_ASSERT( std::size( meshletInfoBuffer ) <= u32( -1 ) );
+//		const u32 baseMeshletOffset = ( u32 ) std::size( meshletInfoBuffer );
+//		meshletInfoBuffer.reserve( baseMeshletOffset + std::size( meshlets ) );
+//
+//		for( const rt_cluster& m : meshlets )
+//		{
+//			meshlet_info info = {
+//				.aabbMin = m.aabbMin,
+//				.aabbMax = m.aabbMax,
+//				.vertexOffset = ( u32 ) std::size( globalVertexPosBuffer ),
+//				.triangleOffset = ( u32 ) std::size( globalTriangleBuffer ),
+//				.vertexCount = ( u8 ) std::size( m.positions ),
+//				.triangleCount = ( u8 ) std::size( m.triangles )
+//			};
+//
+//			std::ranges::copy( m.positions, std::back_inserter( globalVertexPosBuffer ) );
+//			std::ranges::copy( m.packedAttrs, std::back_inserter( globalPackedVertexBuffer ) );
+//			std::ranges::copy( m.triangles, std::back_inserter( globalTriangleBuffer ) );
+//			meshletInfoBuffer.push_back( info );
+//		}
+//
+//		HP_ASSERT( std::size( meshlets ) <= u32( -1 ) );
+//		return { .baseOffset = baseMeshletOffset, .count = ( u32 ) std::size( meshlets ) };
+//	}
+//
+//	inline std::vector<u8> HellPackSerialize()
+//	{
+//		hellpack_serializble_buffer bufs[] = {
+//			 instances,
+//			 globalTlasBuffer,
+//			 globalClasBuffer,
+//			 meshletInfoBuffer,
+//			 globalVertexPosBuffer,
+//			 globalPackedVertexBuffer,
+//			 globalTriangleBuffer,
+//		};
+//
+//		return MakeHellpackBlob( bufs );
+//	}
+//};
+//
+//struct rt_world_data
+//{
+//	std::vector<mesh_instance> instances;
+//	std::vector<gpu_bvh2_node> globalTlasBuffer;
+//	std::vector<gpu_bvh2_node> globalBlasBuffer;
+//	std::vector<position_t> globalVertexPosBuffer;
+//	std::vector<vertex_attrs> globalPackedVertexBuffer;
+//	std::vector<u16> globalTriangleBuffer;
+//
+//	rt_mesh_desc AppendMesh( const packed_mesh& mesh )
+//	{
+//		HP_ASSERT( std::size( globalVertexPosBuffer ) == std::size( globalPackedVertexBuffer ) );
+//		HP_ASSERT( std::size( globalVertexPosBuffer ) < u32( -1 ) );
+//		HP_ASSERT( std::size( globalTriangleBuffer ) < u32( -1 ) );
+//		HP_ASSERT( std::size( globalBlasBuffer ) < u32( -1 ) );
+//
+//		HP_ASSERT( std::size( mesh.blas ) < u16( -1 ) );
+//		HP_ASSERT( std::size( mesh.positions ) < u16( -1 ) );
+//		HP_ASSERT( std::size( mesh.indices ) < u16( -1 ) );
+//
+//		u32 baseBvhNodeOffset = std::size( globalBlasBuffer );
+//		u32 baseVertexOffset = std::size( globalVertexPosBuffer );
+//		u32 baseIndexOffset = std::size( globalTriangleBuffer );
+//
+//		u16 blasNodeCount = std::size( mesh.blas );
+//		u16 vertexCount = std::size( mesh.positions );
+//		u16 indexCount = std::size( mesh.indices );
+//
+//		globalBlasBuffer.reserve( baseBvhNodeOffset + blasNodeCount );
+//		globalVertexPosBuffer.reserve( baseVertexOffset + vertexCount );
+//		globalPackedVertexBuffer.reserve( baseVertexOffset + vertexCount );
+//		globalTriangleBuffer.reserve( baseIndexOffset + indexCount );
+//
+//		std::ranges::copy( mesh.blas, std::back_inserter( globalBlasBuffer ) );
+//		std::ranges::copy( mesh.positions, std::back_inserter( globalVertexPosBuffer ) );
+//		std::ranges::copy( mesh.attrs, std::back_inserter( globalPackedVertexBuffer ) );
+//		std::ranges::copy( mesh.indices, std::back_inserter( globalTriangleBuffer ) );
+//
+//		return { 
+//			.bvhRoot = baseBvhNodeOffset,
+//			.baseVertexOffset = baseVertexOffset,
+//			.baseIndexOffset = baseIndexOffset,
+//			.bvhNodeCount = blasNodeCount,
+//			.vertexCount = vertexCount,
+//			.indexCount = indexCount
+//		};
+//	}
+//
+//	inline std::vector<u8> HellPackSerialize()
+//	{
+//		hellpack_serializble_buffer bufs[] = {
+//			instances,
+//			globalTlasBuffer,
+//			globalBlasBuffer,
+//			globalVertexPosBuffer,
+//			globalPackedVertexBuffer,
+//			globalTriangleBuffer,
+//		};
+//
+//		return MakeHellpackBlob( bufs );
+//	}
+//};
 
 inline auto InstanceTlasAabbView( const std::ranges::forward_range auto& instances )
 {
@@ -739,37 +752,6 @@ inline V MapGetIfExistsElseDefault( const ankerl::unordered_dense::map<K, V>& ma
 	return {};
 }
 
-inline void WriteFileBinary( const char* path, std::span<const u8> bytes )
-{
-	FILE* f = nullptr;
-	HP_ASSERT( ::fopen_s( &f, path, "wb" ) == 0 );
-
-	u64 written = ::fwrite( std::data( bytes ), 1, std::size( bytes ), f );
-	HP_ASSERT( std::size( bytes ) == written );
-
-	i32 rc = ::fclose( f );
-	HP_ASSERT( rc == 0 );
-}
-
-inline auto ReadFileBinary( const char* path )
-{
-	FILE* f = nullptr;
-	HP_ASSERT( ::fopen_s( &f, path, "rb" ) == 0 );
-	HP_ASSERT( f );
-
-	HP_ASSERT( ::fseek( f, 0, SEEK_END ) == 0 );
-	i32 sz = ::ftell( f );
-	HP_ASSERT( sz >= 0 );
-	HP_ASSERT( ::fseek( f, 0, SEEK_SET ) == 0 );
-
-	std::vector<u8> out( sz );
-	u64 read = ::fread( std::data( out ), 1, std::size( out ), f );
-	HP_ASSERT( std::size( out ) == read );
-
-	HP_ASSERT( ::fclose( f ) == 0 );
-	return out;
-}
-
 constexpr bool CHECK_SERIALIZATION_RESULT = true;
 
 struct raw_mesh_desc
@@ -817,16 +799,14 @@ int main()
 
 	std::vector<raw_mesh_desc> meshDesc;
 	meshDesc.reserve( std::size( rawMeshes ) );
-	for( raw_mesh& mesh : rawMeshes )
+	for( const raw_mesh& mesh : rawMeshes )
 	{
-		if( !std::size( mesh.tans ) )
-		{
-			mesh.tans = ComputeMikkTSpaceTangentsInplace( mesh );
-		}
+		// NOTE: it moves stuff
+		raw_mesh validatedRawMesh = ValidateAndNormalizeRawMesh( mesh );
 
-		std::vector<meshlet> meshlets = PackMeshlets( mesh );
+		std::vector<meshlet> meshlets = PackMeshlets( validatedRawMesh );
 		auto aabbView = meshlets | std::views::transform( 
-			[] ( const meshlet& m ) { return aabb_t<float3>{.min = m.aabbMin, .max = m.aabbMax }; } );
+			[] ( const meshlet& m ) { return aabb_t<float3>{ .min = m.aabbMin, .max = m.aabbMax }; } );
 
 		aabb_t<float3> aabb = MergeAabbs( aabbView );
 
@@ -837,7 +817,7 @@ int main()
 			.aabbMax = aabb.max,
 			.baseMeshletOffset = ( u32 ) meshletsRange.baseOffset,
 			.meshletCount = ( u16 ) meshletsRange.count,
-			.materialIdx = ( u16 ) mesh.materialIdx
+			.materialIdx = ( u16 ) validatedRawMesh.materialIdx
 		} );
 	}
 
@@ -894,27 +874,27 @@ int main()
 
 	if constexpr( CHECK_SERIALIZATION_RESULT )
 	{
-		auto read = ReadFileBinary( "D:/3d models/nightclub_futuristic_pub_ambience_asset.hllp" );
-		hellpack_view hellpackView = { read };
+		auto blob = ReadFileBinary( "D:/3d models/nightclub_futuristic_pub_ambience_asset.hllp" );
 
-		byte_view bufs[] = {
-			MakeByteView( worldData.instances ),
-			MakeByteView( worldData.meshletInfoBuffer ),
-			MakeByteView( worldData.meshletVertexBuffer ),
-			MakeByteView( worldData.meshletTriangleBuffer ),
-			MakeByteView( worldData.materials ),
-			MakeByteView( worldData.textureDdsBlob ),
-			MakeByteView( worldData.samplers ),
+		hellpack_view hellpackView = { blob };
+
+		hellpack_serializble_buffer bufs[] = {
+			{ worldData.instances, hellpack_entry_type::INST },
+			{ worldData.meshletInfoBuffer, hellpack_entry_type::MLET },
+			{ worldData.meshletVertexBuffer, hellpack_entry_type::VTX },
+			{ worldData.meshletTriangleBuffer, hellpack_entry_type::TRI },
+			{ worldData.materials, hellpack_entry_type::MTRL },
+			{ worldData.textureDdsBlob, hellpack_entry_type::TEX },
+			{ worldData.samplers, hellpack_entry_type::SAMP },
 		};
 
-		for( u64 i : std::views::iota( 0u, hellpack_entry_slot::COUNT ) )
+		for( u64 bi = 0; bi < std::size( bufs ); ++bi )
 		{
-			byte_view bv = hellpackView.Bytes( hellpack_entry_slot( i ) );
-			HP_ASSERT( ByteEqual( bv, bufs[ i ] ) );
+			const auto& buf = bufs[ bi ];
+			byte_view bv = hellpackView.Bytes( buf.typeOf );
+			HP_ASSERT( ByteEqual( bv, buf.data ) );
 		}
 	}
-	
-	//batchExec.Join();
 
 	return 0;
 }

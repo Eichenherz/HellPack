@@ -296,8 +296,6 @@ struct gltf_loader
 
 		gltf_raw_attr_stream rawIdxStream = GetRawAttributeStream( idxAccessor );
 
-		HP_ASSERT( ( std::size( rawIdxStream ) % 3 ) == 0 );
-
 		std::vector<u32> normalized( std::size( rawIdxStream ) );
 
 		auto CasterLambda = [] ( auto v ) { return ( u32 ) v; }; 
@@ -387,14 +385,18 @@ struct gltf_loader
 		{
 			for( const tinygltf::Primitive& primMesh : m.primitives )
 			{
-				// NOTE: we impose only indexed meshes
-				HP_ASSERT( -1 != primMesh.indices );
-				std::vector<u32> normalizedIndexBuffer = GetIndexBufferFromStream( model.accessors[ primMesh.indices ] );
-
-				// NOTE: gltf guarentees that all present attr streams have the same element count 
+				std::vector<u32> normalizedIndexBuffer;
+				if( -1 != primMesh.indices )
+				{
+					normalizedIndexBuffer = GetIndexBufferFromStream( model.accessors[ primMesh.indices ] );
+				}
+				
 				// NOTE: gltf mandates this stream be present
 				const gltf_typed_attr_stream<float3> posStream = {
 					GetRawAttributeStream( *GetAccessorByName( "POSITION", primMesh ) ) };
+
+				// NOTE: gltf guarentees that all present attr streams have the same element count 
+				const u64 attrStreamCount = std::size( posStream );
 
 				raw_mesh mesh = {
 					.name = m.name.c_str(),
@@ -405,18 +407,21 @@ struct gltf_loader
 
 				if( const tinygltf::Accessor* pAccessor = GetAccessorByName( "NORMAL", primMesh ); pAccessor )
 				{
-					const gltf_typed_attr_stream<float3> normStream = { GetRawAttributeStream( *pAccessor ) };
-					mesh.normals = { std::cbegin( normStream ), std::cend( normStream ) };
+					const gltf_typed_attr_stream<float3> stream = { GetRawAttributeStream( *pAccessor ) };
+					HP_ASSERT( attrStreamCount == std::size( stream ) );
+					mesh.normals = { std::cbegin( stream ), std::cend( stream ) };
 				}
 				if( const tinygltf::Accessor* pAccessor = GetAccessorByName( "TANGENT", primMesh ); pAccessor )
 				{
-					const gltf_typed_attr_stream<float4> tanStream = { GetRawAttributeStream( *pAccessor ) };
-					mesh.tans = { std::cbegin( tanStream ), std::cend( tanStream ) };
+					const gltf_typed_attr_stream<float4> stream = { GetRawAttributeStream( *pAccessor ) };
+					HP_ASSERT( attrStreamCount == std::size( stream ) );
+					mesh.tans = { std::cbegin( stream ), std::cend( stream ) };
 				}
 				if( const tinygltf::Accessor* pAccessor = GetAccessorByName( "TEXCOORD_0", primMesh ); pAccessor )
 				{
-					const gltf_typed_attr_stream<float2> uvStream = { GetRawAttributeStream( *pAccessor ) };
-					mesh.uvs = { std::cbegin( uvStream ), std::cend( uvStream ) };
+					const gltf_typed_attr_stream<float2> stream = { GetRawAttributeStream( *pAccessor ) };
+					HP_ASSERT( attrStreamCount == std::size( stream ) );
+					mesh.uvs = { std::cbegin( stream ), std::cend( stream ) };
 				}
 				meshesOut.emplace_back( mesh );
 			}
@@ -490,8 +495,6 @@ struct gltf_loader
 				const gltf_texture occlusionTex = ProcessTexture( material.occlusionTexture );
 				metadata.occlusionIdx = occlusionTex.imageIdx;
 				samplers.insert( occlusionTex.samplerIdx );
-				// NOTE: disallow occlusion for now, it must be packed with MR in a future release
-				HP_ASSERT( decltype( metadata.occlusionIdx )( -1 ) == metadata.occlusionIdx );
 
 				const gltf_texture emissiveTex = ProcessTexture( material.emissiveTexture );
 				metadata.emissiveIdx = emissiveTex.imageIdx;
@@ -520,9 +523,9 @@ struct gltf_loader
 		{
 			HP_ASSERT( std::size( img.image ) );
 			imgOut.push_back( {
-				.data = std::span<const u8>{ std::data( img.image ), std::size( img.image ) },
+				.data = { std::cbegin( img.image ), std::cend( img.image ) },
 				.metadata = GetGltfTextureMetadata( img )
-							  } );
+			} );
 		}
 
 		return imgOut;

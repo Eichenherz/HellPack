@@ -125,5 +125,8 @@
     <ClInclude Include="hp_bvh.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="hell_pack.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

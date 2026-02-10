@@ -161,6 +161,7 @@
     <ClInclude Include="3rdParty\meshoptimizer\src\meshoptimizer.h" />
     <ClInclude Include="core_types.h" />
     <ClInclude Include="gltf_loader.h" />
+    <ClInclude Include="hell_pack.h" />
     <ClInclude Include="hp_bcn_compression.h" />
     <ClInclude Include="hp_bvh.h" />
     <ClInclude Include="hp_bvh_builder.h" />

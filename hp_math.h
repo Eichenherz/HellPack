@@ -259,4 +259,6 @@ __forceinline aabb_t<float3> TransformAABB(
 	return TransformAABB( aabb.min, aabb.max, t, r, s );
 }
 
+inline u64 AlignUp( u64 x, u64 a ) { return ( x + ( a - 1 ) ) & ~( a - 1 ); }
+
 #endif // !__HP_MATH_H__

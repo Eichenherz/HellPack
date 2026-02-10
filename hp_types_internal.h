@@ -10,13 +10,13 @@
 
 struct raw_mesh
 {
-	std::string name;
+	std::string         name;
 	std::vector<float3> pos;
 	std::vector<float3> normals;
 	std::vector<float4> tans;
 	std::vector<float2> uvs;
-	std::vector<u32> indices;
-	i32 materialIdx;
+	std::vector<u32>    indices;
+	i32                 materialIdx;
 };
 
 enum class image_channels_t : u8
