@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include <array>
+
 using u8 = uint8_t;
 using u16 = uint16_t;
 using u32 = uint32_t;
@@ -20,5 +22,33 @@ inline bool IsIndexValid( T idx ) { return T( INVALID_IDX ) != idx; }
 
 template<typename T>
 concept Number32BitsMax = ( sizeof( T ) <= 4 );
+
+// NOTE: always relative to the main file
+using vfs_path = std::array<char, 128>;
+
+template <>
+struct std::hash<vfs_path>
+{
+    std::uint64_t operator()( const vfs_path& p ) const
+    {
+        // Hash as C-string up to first '\0' (or full buffer if no terminator).
+        // FNV-1a 64-bit, returned as size_t.
+        constexpr std::uint64_t kOffset = 14695981039346656037ull;
+        constexpr std::uint64_t kPrime = 1099511628211ull;
+
+        std::uint64_t h = kOffset;
+
+        for( char c : p )
+        {
+            if( c == '\0' )
+                break;
+
+            h ^= ( u8 ) c;
+            h *= kPrime;
+        }
+
+        return h;
+    }
+};
 
 #endif // !__CORE_TYPES_H__

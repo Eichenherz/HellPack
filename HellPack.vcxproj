@@ -29,26 +29,26 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
@@ -71,7 +71,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>D:\EichenRepos\HellPack\3rdParty\dds;D:\EichenRepos\HellPack\3rdParty\bc7enc_rdo;D:\EichenRepos\HellPack\3rdParty\unordered_dense\include;D:\EichenRepos\HellPack\3rdParty\madmannbvh\src;D:\EichenRepos\HellPack\3rdParty\MikkTSpace;D:\EichenRepos\HellPack\3rdParty\meshoptimizer\src;D:\EichenRepos\HellPack\3rdParty\tinygltf;$(IncludePath)</IncludePath>
+    <IncludePath>D:\EichenRepos\HellPack\3rdParty\miniz;D:\EichenRepos\HellPack\3rdParty\dds;D:\EichenRepos\HellPack\3rdParty\bc7enc_rdo;D:\EichenRepos\HellPack\3rdParty\unordered_dense\include;D:\EichenRepos\HellPack\3rdParty\madmannbvh\src;D:\EichenRepos\HellPack\3rdParty\MikkTSpace;D:\EichenRepos\HellPack\3rdParty\meshoptimizer\src;D:\EichenRepos\HellPack\3rdParty\tinygltf;$(IncludePath)</IncludePath>
     <SourcePath>$(SourcePath)</SourcePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -155,10 +155,12 @@
     <ClCompile Include="3rdParty\meshoptimizer\src\vertexfilter.cpp" />
     <ClCompile Include="3rdParty\meshoptimizer\src\vfetchoptimizer.cpp" />
     <ClCompile Include="3rdParty\MikkTSpace\mikktspace.c" />
+    <ClCompile Include="3rdParty\miniz\miniz.c" />
     <ClCompile Include="HellPack.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="3rdParty\meshoptimizer\src\meshoptimizer.h" />
+    <ClInclude Include="3rdParty\miniz\miniz.h" />
     <ClInclude Include="core_types.h" />
     <ClInclude Include="gltf_loader.h" />
     <ClInclude Include="hell_pack.h" />

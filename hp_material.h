@@ -54,15 +54,12 @@ constexpr sampler_config DEFAULT_SAMPLER = {
 	.wrapModeT = sampler_wrap_mode_flags::WRAP_REPEAT
 };
 
-// NOTE: always relative to the main file
-using tex_path = std::array<char, 128>;
-
 struct material_desc
 {
-	alignas( 8 ) tex_path baseColor;
-	alignas( 8 ) tex_path metallicRoughness;
-	alignas( 8 ) tex_path normal;
-	alignas( 8 ) tex_path emissive;
+	alignas( 8 ) vfs_path baseColor;
+	alignas( 8 ) vfs_path metallicRoughness;
+	alignas( 8 ) vfs_path normal;
+	alignas( 8 ) vfs_path emissive;
 
 	float4 baseColFactor;
 	float metallicFactor;

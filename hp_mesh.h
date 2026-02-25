@@ -4,8 +4,6 @@
 #include "core_types.h"
 #include "hp_bvh.h"
 
-#include <bit>
-#include <string>
 #include <vector>
 
 struct float2;
@@ -61,10 +59,22 @@ struct vertex_attrs
 
 struct meshlet
 {
-	std::vector<packed_vtx> vertices;
-	std::vector<u8> triangles;
 	float3	aabbMin;
 	float3	aabbMax;
+
+	u32 vtxOffset;
+	u32 triOffset;
+
+	u32 vtxCount;
+	u32 triCount;
+};
+
+
+struct world_node
+{
+	packed_trs toWorld;
+	u16 meshIdx;
+	u16 materialIdx;
 };
 
 struct rt_cluster
@@ -86,36 +96,6 @@ struct rt_clustered_instance
 	u32 baseMeshletOffset;
 	u32 meshletCount;
 	u16 materialIdx;
-};
-
-struct clustered_instance
-{
-	packed_trs toWorld;
-	float3 aabbMin;
-	float3 aabbMax;
-	u32 baseMeshletOffset;
-	u16 meshletCount;
-	u16 materialIdx;
-};
-
-struct rt_mesh_desc
-{
-	bvh2_node_ref32			bvhRoot;
-	u32						baseVertexOffset;
-	u32						baseIndexOffset;
-	u16						bvhNodeCount;
-	u16						vertexCount;
-	u16						indexCount;
-};
-
-struct mesh_instance
-{
-	packed_trs				toWorld;
-	float3					aabbMin;
-	float3					aabbMax;
-	// NOTE: to avoid indirection we duplicate this across instances
-	rt_mesh_desc				meshDesc;
-	u16						materialIdx;
 };
 
 #endif // !__HP_MESH_H__

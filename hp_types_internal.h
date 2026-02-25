@@ -16,7 +16,7 @@ struct raw_mesh
 	std::vector<float4> tans;
 	std::vector<float2> uvs;
 	std::vector<u32>    indices;
-	i32                 materialIdx;
+	u32                 materialIdx;
 };
 
 enum class image_channels_t : u8
@@ -69,6 +69,14 @@ struct packed_mesh
 	u16 materialIdx;
 };
 
+struct raw_meshlet
+{
+	std::vector<packed_vtx> vertices;
+	std::vector<u8> triangles;
+	float3	aabbMin;
+	float3	aabbMax;
+};
+
 struct raw_material_info
 {
 	std::string name;
@@ -93,6 +101,15 @@ struct range64
 {
 	u64 baseOffset : 32;
 	u64 count : 32;
+};
+
+struct mesh_asset
+{
+	std::vector<packed_vtx> vertices;
+	std::vector<u8> triangles;
+	std::vector<meshlet> meshlets;
+	float3	aabbMin;
+	float3  aabbMax;
 };
 
 #endif // !__HP_TYPES_INTERNAL_H__
