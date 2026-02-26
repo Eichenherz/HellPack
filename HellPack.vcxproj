@@ -176,6 +176,7 @@
     <ClInclude Include="hp_types_internal.h" />
     <ClInclude Include="mikkt_space.h" />
     <ClInclude Include="range_utils.h" />
+    <ClInclude Include="zip_pack.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

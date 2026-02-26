@@ -4,8 +4,10 @@
 #include "core_types.h"
 #include "hp_error.h"
 
+#include "hp_mesh.h"
+#include "hp_material.h"
+
 #include <span>
-#include <ranges>
 
 #include "range_utils.h"
 
@@ -20,112 +22,125 @@ constexpr u64 HELLPACK_MAGIC =
 ( u64( 'C' ) << 48 ) |
 ( u64( 'K' ) << 56 );
 
-enum hellpack_entry_type : u8
+constexpr char HELLPACK_MESH_DIR[] = "Mesh/";
+
+// TODO: how to enforce these are dds ?
+constexpr char HELLPACK_TEX_DIR[] = "Tex/";
+
+enum hellpack_entry_t : u32
 {
-	INST = 0,
-	//	TLAS,
-	//	BLAS,
-	MLET,
-	VTX,
-	//	VPOS,
-	//	PVTX,
-	TRI,
-	MTRL,
-	SAMP,
+	LEVEL = 0,
+	MESH,
+	TEXTURE,
 	COUNT
 };
 
-#pragma pack(push, 1)
-struct hellpack_entry
+struct hellpack_data_ref
 {
-	u64 offsetInBytes;
-	u64 byteCount;
-	hellpack_entry_type typeOf;
+	u64 offsetInBytes : 32;
+	u64 sizeInBytes : 32;
 };
-#pragma pack(pop)
 
-#pragma pack(push, 1)
-struct hellpack_blob_header
+struct hellpack_file_header
 {
-	u64 magic;
-	u64 fileSizeBytes;
-	u64 entryTableOffsetInBytes;
-	u32 version;
-	u32 entriesCount;
+	u64					magic;
+	u64					fileSizeBytes;
+	u32					version;
+	u32   		        entriesCount; // TODO: enforce an explicit ordering on the entires, rn they're as in the struct
+	hellpack_entry_t    type;
 };
-#pragma pack(pop)
 
-static_assert( sizeof( hellpack_blob_header ) % 8 == 0 );
-
-// TODO: allow more flexible layout
-struct hellpack_view
+struct hellpack_level
 {
-	const u8* base;
-	u64 sizeInBytes;
-	const hellpack_blob_header* h;
-	const hellpack_entry* pEntries;
-	u32 entryCount;
-	u32 entryTypeToIdxMap[ hellpack_entry_type::COUNT ];
-
-
-	hellpack_view( std::span<const u8> blob )
-	{
-		HP_ASSERT( std::size( blob ) >= sizeof( hellpack_blob_header ) );
-
-		base = std::data( blob );
-		sizeInBytes = std::size( blob );
-		h = ( const hellpack_blob_header* ) ( base );
-
-		HP_ASSERT( h->magic == HELLPACK_MAGIC );
-		HP_ASSERT( h->version == HELLPACK_VERSION );
-		HP_ASSERT( h->fileSizeBytes == sizeInBytes );
-		// NOTE: since we use SoA layout we shouldn't have more than 1 buffer per entry
-		HP_ASSERT( h->entriesCount <= std::size( entryTypeToIdxMap ) );
-
-		pEntries = ( const hellpack_entry* ) ( base + h->entryTableOffsetInBytes );
-		entryCount = h->entriesCount;
-
-		std::ranges::fill( entryTypeToIdxMap, u32( INVALID_IDX ) );
-		for( u64 ei = 0; ei < entryCount; ++ei )
-		{
-			const hellpack_entry& entry = pEntries[ ei ];
-			HP_ASSERT( u32( INVALID_IDX ) == entryTypeToIdxMap[ entry.typeOf ] );
-			entryTypeToIdxMap[ entry.typeOf ] = ei;
-		}
-	}
-
-	byte_view Bytes( hellpack_entry_type s ) const
-	{
-		u32 entryIdx = entryTypeToIdxMap[ s ];
-		if( u32( INVALID_IDX ) == entryIdx ) return {};
-
-		const hellpack_entry& entry = pEntries[ entryIdx ];
-
-		const u64 offset = entry.offsetInBytes;
-		const u64 size = entry.byteCount;
-
-		HP_ASSERT( offset + size <= sizeInBytes );
-
-		return { base + offset, ( u32 ) size };
-	}
-
-	template<typename T>
-	typed_view<T> Typed( hellpack_entry_type s ) const
-	{
-		u32 entryIdx = entryTypeToIdxMap[ s ];
-		if( u32( INVALID_IDX ) == entryIdx ) return {};
-
-		const hellpack_entry& entry = pEntries[ entryIdx ];
-
-		const u64 offset = entry.offsetInBytes;
-		const u64 size = entry.byteCount;
-
-		HP_ASSERT( offset % alignof( T ) == 0 );
-		HP_ASSERT( offset + size <= sizeInBytes );
-		HP_ASSERT( ( size % sizeof( T ) ) == 0 );
-
-		return { ( const T* ) ( base + offset ), ( u32 ) ( size / sizeof( T ) ) };
-	}
+	typed_view<world_node>    nodes;
+	typed_view<material_desc> materials;
 };
+
+struct float3;
+
+using index_t = u8;
+struct hellpack_mesh_asset
+{
+	typed_view<packed_vtx>	vertices;
+	typed_view<index_t>		triangles;
+	typed_view<meshlet>		meshlets;
+	float3					aabbMin;
+	float3					aabbMax;
+};
+
+struct hellpack_texture_asset
+{
+	byte_view ddsData;
+};
+
+template<typename HPK_T>
+HPK_T HpkReadBinaryBlob( std::span<const u8> blob )
+{
+	HP_ASSERT( std::size( blob ) >= sizeof( hellpack_file_header ) );
+
+	const u8* base = std::data( blob );
+	const u64 sizeInBytes = std::size( blob );
+
+	const hellpack_file_header& h = ( const hellpack_file_header& ) ( *base );
+
+	HP_ASSERT( HELLPACK_MAGIC == h.magic );
+	HP_ASSERT( HELLPACK_VERSION == h.version );
+	HP_ASSERT( h.fileSizeBytes == sizeInBytes );
+	HP_ASSERT( h.entriesCount > 0 );
+
+	u64 entryTableOffsetInBytes = AlignUp( sizeof( h ), alignof( hellpack_data_ref ) );
+	std::span<const hellpack_data_ref> entryTable = { ( const hellpack_data_ref* ) ( base + entryTableOffsetInBytes ), h.entriesCount };
+
+	if constexpr( std::is_same_v<HPK_T, hellpack_level> )
+	{
+		HP_ASSERT( hellpack_entry_t::LEVEL == h.type );
+		HP_ASSERT( 2 == h.entriesCount );
+
+		return hellpack_level{
+			.nodes = { 
+				( const world_node* ) ( base + entryTable[ 0 ].offsetInBytes ), 
+				( u32 ) ( entryTable[ 0 ].sizeInBytes / sizeof( world_node ) ) 
+		    },
+			.materials = { 
+				( const material_desc* ) ( base + entryTable[ 1 ].offsetInBytes ), 
+				( u32 ) ( entryTable[ 1 ].sizeInBytes / sizeof( material_desc ) ) 
+		    }
+		};
+	}
+	else if constexpr( std::is_same_v<HPK_T, hellpack_mesh_asset> )
+	{
+		HP_ASSERT( hellpack_entry_t::MESH == h.type );
+		HP_ASSERT( 4 == h.entriesCount );
+
+		return hellpack_mesh_asset{
+			.vertices = { 
+				( const packed_vtx* ) ( base + entryTable[ 0 ].offsetInBytes ), 
+				( u32 ) ( entryTable[ 0 ].sizeInBytes / sizeof( packed_vtx ) ) 
+			},
+			.triangles = { 
+				( const u8* ) ( base + entryTable[ 1 ].offsetInBytes ), 
+				( u32 ) entryTable[ 1 ].sizeInBytes
+			},
+			.meshlets = { 
+				( const meshlet* ) ( base + entryTable[ 2 ].offsetInBytes ), 
+				( u32 ) ( entryTable[ 2 ].sizeInBytes / sizeof( meshlet ) ) 
+			},
+			.aabbMin = *( const float3* ) ( base + entryTable[ 3 ].offsetInBytes ),
+			.aabbMax = *( const float3* ) ( base + entryTable[ 3 ].offsetInBytes + sizeof( float3 ) )
+		};
+	}
+	else if constexpr( std::is_same_v<HPK_T, hellpack_texture_asset> )
+	{
+		static_assert( false, "hellpack_texture_asset is currently unsupported use dds directly" );
+		HP_ASSERT( hellpack_entry_t::TEXTURE == h.type );
+		HP_ASSERT( 1 == h.entriesCount );
+
+		return hellpack_texture_asset{
+			.ddsData = { base + entryTable[ 0 ].offsetInBytes, ( u32 ) entryTable[ 0 ].sizeInBytes }
+		};
+	}
+	else static_assert( false, "Unsupported HPK_T" );
+	
+}
 
 #endif // !__HELL_PACK_H__

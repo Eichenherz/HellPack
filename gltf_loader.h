@@ -358,7 +358,7 @@ struct gltf_loader
 				packed_trs currentTrs = GetTrsFromNode( currentNode );
 
 				packed_trs parentTrs = XMComposePackedTRS( curr.parentTRS, currentTrs );
-				flatNodes.push_back( { parentTrs, currentNode.mesh } );
+				flatNodes.push_back( { parentTrs, ( u32 ) currentNode.mesh } );
 				visited[ curr.nodeIdx ] = true;
 
 				for( u32 childNodeIdx : currentNode.children )
@@ -402,7 +402,7 @@ struct gltf_loader
 					.name = m.name.c_str(),
 					.pos = { std::cbegin( posStream ), std::cend( posStream ) },
 					.indices = std::move( normalizedIndexBuffer ),
-					.materialIdx = primMesh.material
+					.materialIdx = std::bit_cast<u32>( primMesh.material )
 				};
 
 				if( const tinygltf::Accessor* pAccessor = GetAccessorByName( "NORMAL", primMesh ); pAccessor )
@@ -511,7 +511,7 @@ struct gltf_loader
 			// NOTE: will have -1/DEFAULT and possibly other samplers, so at most size 2
 			HP_ASSERT( std::size( samplers ) <= 2 );
 			auto it = std::ranges::find_if( samplers, []( i32 x ){ return x != -1; } );
-			metadata.samplerIdx = ( it != std::cend( samplers ) ) ? *it : DEFAULT_SAMPLER_IDX;
+			metadata.samplerIdx = ( it != std::cend( samplers ) ) ? *it : ( u16 ) DEFAULT_SAMPLER_IDX;
 
 			materialsOut.emplace_back( metadata );
 		}

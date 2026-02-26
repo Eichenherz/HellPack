@@ -21,6 +21,33 @@ struct float2 { float x, y; };
 struct float3 { float x, y, z; };
 struct float4 { float x, y, z, w; };
 
+constexpr bool operator==( const float2& a, const float2& b )
+{
+	return a.x == b.x && a.y == b.y;
+}
+constexpr bool operator!=( const float2& a, const float2& b )
+{
+	return !( a == b );
+}
+
+constexpr bool operator==( const float3& a, const float3& b )
+{
+	return a.x == b.x && a.y == b.y && a.z == b.z;
+}
+constexpr bool operator!=( const float3& a, const float3& b )
+{
+	return !( a == b );
+}
+
+constexpr bool operator==( const float4& a, const float4& b )
+{
+	return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+}
+constexpr bool operator!=( const float4& a, const float4& b )
+{
+	return !( a == b );
+}
+
 static_assert( std::is_trivially_copyable_v<float2> );
 static_assert( std::is_trivially_copyable_v<float3> );
 static_assert( std::is_trivially_copyable_v<float4> );
@@ -132,7 +159,7 @@ inline aabb_t<float3> ComputeAabb( std::span<const float3> vertices )
 		max.y = std::max( max.y, vertices[ vi ].y );
 		max.z = std::max( max.z, vertices[ vi ].z );
 	}
-	return { min, max };
+	return { .min = min, .max = max };
 }
 
 inline aabb_t<float2> ComputeAabb( std::span<const float2> vertices )
@@ -148,7 +175,7 @@ inline aabb_t<float2> ComputeAabb( std::span<const float2> vertices )
 		max.x = std::max( max.x, vertices[ vi ].x );
 		max.y = std::max( max.y, vertices[ vi ].y );
 	}
-	return { min, max };
+	return { .min = min, .max = max };
 }
 
 inline aabb_t<float3> MergeAabbPair( const aabb_t<float3>& a, const aabb_t<float3>& b )

@@ -56,10 +56,10 @@ constexpr sampler_config DEFAULT_SAMPLER = {
 
 struct material_desc
 {
-	alignas( 8 ) vfs_path baseColor;
-	alignas( 8 ) vfs_path metallicRoughness;
-	alignas( 8 ) vfs_path normal;
-	alignas( 8 ) vfs_path emissive;
+	u64 baseColorHash;
+	u64 metallicRoughnessHash;
+	u64 normalHash;
+	u64 emissiveHash;
 
 	float4 baseColFactor;
 	float metallicFactor;

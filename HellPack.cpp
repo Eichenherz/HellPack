@@ -4,10 +4,12 @@
 #include <filesystem>
 namespace fs = std::filesystem;
 
+#include <atomic>
+#include <thread>
+
 #include <span>
 #include <ranges>
 #include <format>
-#include <type_traits>
 
 #include <ankerl/unordered_dense.h>
 
@@ -16,20 +18,19 @@ namespace fs = std::filesystem;
 #include "core_types.h"
 #include "hp_error.h"
 
-#include "hell_pack.h"
+#include "zip_pack.h"
 
 // NOTE/TODO: float types are fwd def in mesh to be shared ! must use an internal folder or smth for math
 #include "hp_math.h"
 #include "hp_mesh.h"
-
 #include "hp_material.h"
-#include "hp_bvh_builder.h"
+
+#include "hell_pack.h"
+
 #include "hp_encoding.h"
 #include "hp_bcn_compression.h"
 #include "hp_serialization.h"
 #include "mikkt_space.h"
-
-#include "range_utils.h"
 
 #include "gltf_loader.h"
 
@@ -209,7 +210,7 @@ inline auto GetMeshletLocalAttrStream(
 	return localStream;
 }
 
-mesh_asset HpMakeMeshAssetFromMeshlets( const raw_mesh& rawMesh )
+mesh_asset HpkMakeMeshAssetFromMeshlets( const raw_mesh& rawMesh )
 {
 	__meshopt_meshlets meshoptMeshlets = MeshoptMakeClusters( rawMesh.pos, rawMesh.indices, meshlet_config{} );
 
@@ -256,14 +257,15 @@ mesh_asset HpMakeMeshAssetFromMeshlets( const raw_mesh& rawMesh )
 
 		const aabb_t<float3> aabb = ComputeAabb( mletPosStream );
 
+		HP_ASSERT( ( m.vertex_count < u32( u8( -1 ) ) ) && ( m.triangle_count < u32( u8( -1 ) ) ) );
+
 		meshlet outMeshlet = {
 			.aabbMin = aabb.min,
 			.aabbMax = aabb.max,
 			.vtxOffset = ( u32 ) std::size( vertices ),
 			.triOffset = ( u32 ) std::size( triangles ),
-			.vtxCount = m.vertex_count,
-			.triCount = m.triangle_count
-			
+			.vtxCount = ( u8 ) m.vertex_count,
+			.triCount = ( u8 ) m.triangle_count
 		};
 		meshlets.push_back( outMeshlet );
 
@@ -282,10 +284,18 @@ mesh_asset HpMakeMeshAssetFromMeshlets( const raw_mesh& rawMesh )
 		.vertices = std::move( vertices ),
 		.triangles = std::move( triangles ),
 		.meshlets = std::move( meshlets ),
-		.aabbMin = aabb.min,
-		.aabbMax = aabb.max
+		.aabb = { aabb.min, aabb.max }
 	};
 }
+
+struct rt_cluster
+{
+	std::vector<float3> positions;
+	std::vector<vertex_attrs> packedAttrs;
+	std::vector<u8> triangles;
+	float3	aabbMin;
+	float3	aabbMax;
+};
 
 std::vector<rt_cluster> PackClustersRaytracing( const raw_mesh& rawMesh )
 {
@@ -375,84 +385,7 @@ std::vector<vertex_attrs> PackVertexAttributes(
 	return packedAttrs;
 }
 
-packed_mesh PackMesh( const raw_mesh& rawMesh, bvh_builder& bvhBuilder )
-{
-	std::vector<vertex_attrs> packedAttrs;
-	
-	if( !std::size( rawMesh.tans ) )
-	{
-		std::vector<float4> tans = ComputeMikkTSpaceTangentsInplace( rawMesh );
-		packedAttrs = PackVertexAttributes( rawMesh.normals, tans, rawMesh.uvs );
-	}
-	else
-	{
-		packedAttrs = PackVertexAttributes( rawMesh.normals, rawMesh.tans, rawMesh.uvs );
-	}
-
-	const auto& positions = rawMesh.pos;
-	const auto& indices = rawMesh.indices;
-
-	std::vector<float3> meshPos( std::size( positions ) );
-	std::vector<vertex_attrs> meshVtxAttr( std::size( packedAttrs ) );
-	std::vector<u16> meshIdx( std::size( indices ) );
-	
-	std::vector<gpu_bvh2_node> blas;
-	aabb_t<float3> aabb = {};
-
-	const bool buildBvhThresholdReached = std::size( indices ) > 3 * MAX_LEAF_PRIM_COUNT;
-	if( buildBvhThresholdReached )
-	{
-		auto triAabbView = TriangleAabbView( positions, indices );
-		bvh_output bvh = bvhBuilder.BuildBvhOverPrimitives( triAabbView );
-
-		blas = bvh.gpuNodes;
-		aabb = bvh.topLevelAabb;
-
-		std::vector<u32> permutedIndices = PermuteTrianglesByPrimitiveRemap( indices, bvh.primitiveIndices );
-		std::vector<u32> remap = BuildVertexRemapFromPermutedIndices( permutedIndices, std::size( positions ) );
-
-		meshopt_remapIndexBuffer( 
-			std::data( permutedIndices ), std::data( permutedIndices ), std::size( permutedIndices ), std::data( remap ) );
-
-		u64 vtxCount = std::size( meshPos );
-		meshopt_remapVertexBuffer( 
-			std::data( meshPos ), std::data( positions ), vtxCount, sizeof( positions[ 0 ] ), std::data( remap ) );
-		meshopt_remapVertexBuffer( 
-			std::data( meshVtxAttr ), std::data( packedAttrs ), vtxCount, sizeof( packedAttrs[ 0 ] ), std::data( remap ) );
-
-		auto u16IndicesView = permutedIndices | std::views::transform( [] ( u32 idx ) { return ( u16 ) idx; } );
-		std::ranges::copy( u16IndicesView, std::begin( meshIdx ) );
-	}
-	else
-	{
-		auto u16IndicesView = rawMesh.indices | std::views::transform( [] ( u32 idx ) { return ( u16 ) idx; } );
-		
-		std::ranges::copy( positions, std::begin( meshPos ) );
-		std::ranges::copy( packedAttrs, std::begin( meshVtxAttr ) );
-		std::ranges::copy( u16IndicesView, std::begin( meshIdx ) );
-
-		aabb = ComputeAabb( positions );
-	}
-	
-	return {
-		.positions = std::move( meshPos ),
-		.attrs = std::move( meshVtxAttr ),
-		.blas = std::move( blas ),
-		.aabb = aabb,
-		.materialIdx = ( u16 ) rawMesh.materialIdx 
-	};
-}
-
 using position_t = float3;
-
-inline auto InstanceTlasAabbView( const std::ranges::forward_range auto& instances )
-{
-	return instances | std::views::transform( 
-		[] ( const auto& i ) 
-		{ 
-			return TransformAABB( i.aabbMin, i.aabbMax, i.toWorld.t, i.toWorld.r, i.toWorld.s );
-		} );
-};
 
 using dds_texture = std::vector<u8>;
 
@@ -498,19 +431,6 @@ struct compression_job
 	}
 };
 
-using compression_job_map_t = ankerl::unordered_dense::map<u16, compression_job>;
-
-inline u64 GetTotalTexutreDataSizeInBytes( const compression_job_map_t& jobMap )
-{
-	u64 byteCount = 0;
-	for( auto& [_, job] : jobMap )
-	{
-		byteCount += std::size( job.tex );
-	}
-
-	return byteCount;
-}
-
 inline vfs_path MakeVfsPath( const std::string& str )
 {
 	vfs_path texPath = {};
@@ -521,44 +441,79 @@ inline vfs_path MakeVfsPath( const std::string& str )
 	return texPath;
 }
 
-compression_job_map_t
-PrepareBcnCompressionBatch( std::span<const raw_material_info> materials, std::span<const raw_image_view> imageViews )
+struct materials_jobs
+{
+	std::vector<material_desc>   materials;
+	std::vector<compression_job> jobs;
+};
+
+materials_jobs PrepareBcnCompressionBatch( std::span<const raw_material_info> rawMaterials, std::span<const raw_image_view> imageViews )
 {
 	HP_ASSERT( std::size( imageViews ) < u16( INVALID_IDX ) );
 
-	compression_job_map_t jobsMap;
+	// NOTE: we use indices and vfs_path here bc we're deduping wrt to tinygltf's stuff which is index based
+	ankerl::unordered_dense::set<u16> jobsSet;
+	std::vector<compression_job> jobs;
 
-	auto ProcessImageView = [&] ( u16 idx, dds::DXGI_FORMAT fmt, const vfs_path& filename )
+	jobsSet.reserve( std::size( imageViews ) );
+	jobs.reserve( std::size( imageViews ) );
+
+	auto ProcessImageView = [ & ]( u16 idx, dds::DXGI_FORMAT fmt, const vfs_path& filename ) -> u64
 	{
-		if( !IsIndexValid( idx ) ) return;
-		if( jobsMap.find( idx ) != std::cend( jobsMap ) ) return;
+		if( !IsIndexValid( idx ) ) return {};
+		if( std::cend( jobsSet ) == jobsSet.find( idx ) )
+		{
+			const raw_image_view& imgView = imageViews[ idx ];
+			HP_ASSERT( std::size( imgView.data ) );
 
-		const raw_image_view& imgView = imageViews[ idx ];
-		HP_ASSERT( std::size( imgView.data ) );
+			jobsSet.emplace( idx );
 
-		compression_job job = {
-			.filename = filename,
-			.src = imgView.data, 
-			.fmt = fmt, 
-			.width = imgView.metadata.width, 
-			.height = imgView.metadata.height 
-		};
-		jobsMap.emplace( idx, job );
+			jobs.push_back( {
+				.filename = filename,
+				.src = imgView.data, 
+				.fmt = fmt, 
+				.width = imgView.metadata.width, 
+				.height = imgView.metadata.height 
+			} );
+		}
+		
+		return std::hash<vfs_path>{}( filename );
 	};
 
+	std::vector<material_desc> materials;
+	materials.reserve( std::size( rawMaterials ) );
 	// NOTE: GLTF conventions
-	for( const raw_material_info& mtrl : materials )
+	for( const raw_material_info& mtrl : rawMaterials )
 	{
-		ProcessImageView( mtrl.baseColorIdx, dds::DXGI_FORMAT_BC7_UNORM_SRGB, MakeVfsPath( mtrl.name + "_albedo.dds" ) );
-		ProcessImageView( mtrl.normalIdx, dds::DXGI_FORMAT_BC5_UNORM, MakeVfsPath( mtrl.name + "_normal.dds" ) );
-		ProcessImageView( mtrl.metallicRoughnessIdx, dds::DXGI_FORMAT_BC7_UNORM, MakeVfsPath( mtrl.name + "_mro.dds" ) );
 		//ProcessImageView( material.occlusionIdx, bc_format_t::BC7_RGBA );
 		// NOTE: currently not suporting ambient occlusion which must be packed into MR
 		HP_ASSERT( !IsIndexValid( mtrl.occlusionIdx ) );
-		ProcessImageView( mtrl.emissiveIdx, dds::DXGI_FORMAT_BC7_UNORM_SRGB, MakeVfsPath( mtrl.name + "_emissive.dds" ) );
+
+		u64 baseColorHash = ProcessImageView( mtrl.baseColorIdx, dds::DXGI_FORMAT_BC7_UNORM_SRGB, 
+			MakeVfsPath( mtrl.name + "_albedo.dds" ) );
+		u64 metallicRoughnessHash = ProcessImageView( mtrl.normalIdx, dds::DXGI_FORMAT_BC5_UNORM, 
+			MakeVfsPath( mtrl.name + "_normal.dds" ) );
+		u64 normalHash = ProcessImageView( mtrl.metallicRoughnessIdx, dds::DXGI_FORMAT_BC7_UNORM, 
+			MakeVfsPath( mtrl.name + "_mro.dds" ) );
+		u64 emissiveHash = ProcessImageView( mtrl.emissiveIdx, dds::DXGI_FORMAT_BC7_UNORM_SRGB, 
+			MakeVfsPath( mtrl.name + "_emissive.dds" ) );
+
+		materials.push_back( {
+			.baseColorHash = baseColorHash,
+			.metallicRoughnessHash = metallicRoughnessHash,
+			.normalHash = normalHash,
+			.emissiveHash = emissiveHash,
+			.baseColFactor = mtrl.baseColFactor,
+			.metallicFactor = mtrl.metallicFactor,
+			.roughnessFactor = mtrl.metallicFactor,
+			.alphaCutoff = mtrl.alphaCutoff,
+			.emissiveFactor = mtrl.emissiveFactor,
+			.samplerIdx = mtrl.samplerIdx,
+			.alphaMode = mtrl.alphaMode
+		} );
 	}
 
-	return jobsMap;
+	return { .materials = std::move( materials ), .jobs = std::move( jobs ) };
 }
 
 inline void WaitThreadPoolDone( std::vector<std::thread>& threadPool )
@@ -566,72 +521,38 @@ inline void WaitThreadPoolDone( std::vector<std::thread>& threadPool )
 	for( auto& t : threadPool ) t.join();
 }
 
-
-inline vfs_path MapGetIfExistsElseDefault( const compression_job_map_t& map, u16 idx )
+inline void WriteFileBinary( const char* path, std::span<const u8> bytes )
 {
-	if( auto it = map.find( idx ); it != std::cend( map ) ) return it->second.filename;
-	return {};
+	FILE* f = nullptr;
+	HP_ASSERT( ::fopen_s( &f, path, "wb" ) == 0 );
+
+	u64 written = ::fwrite( std::data( bytes ), 1, std::size( bytes ), f );
+	HP_ASSERT( std::size( bytes ) == written );
+
+	i32 rc = ::fclose( f );
+	HP_ASSERT( rc == 0 );
 }
 
-#include <miniz.h>
-
-#define MINIZ_ERR( pZa ) \
-	const char* s = mz_zip_get_error_string( mz_zip_get_last_error( pZa ) ); \
-	std::cout << std::format( "{} failed: {}\n", __func__, s );
-
-using fixed_str = std::array<char, 256>;
-
-struct zip_writer
+inline std::vector<u8> ReadFileBinary( const char* path )
 {
-	mz_zip_archive  za = {};
+	FILE* f = nullptr;
+	HP_ASSERT( ::fopen_s( &f, path, "rb" ) == 0 );
+	HP_ASSERT( f );
 
-	zip_writer( const char* physicalPath )
-	{
-		mz_zip_zero_struct( &za );
+	HP_ASSERT( ::fseek( f, 0, SEEK_END ) == 0 );
+	i32 sz = ::ftell( f );
+	HP_ASSERT( sz >= 0 );
+	HP_ASSERT( ::fseek( f, 0, SEEK_SET ) == 0 );
 
-		if( !mz_zip_writer_init_file( &za, physicalPath, 0 /* reserve_at_beginning */ ) )
-		{
-			MINIZ_ERR( &za );
-			std::abort();
-		}
-	}
+	std::vector<u8> out( sz );
+	u64 read = ::fread( std::data( out ), 1, std::size( out ), f );
+	HP_ASSERT( std::size( out ) == read );
 
-	zip_writer( const zip_writer& ) = delete;
-	zip_writer& operator=( const zip_writer& ) = delete;
+	HP_ASSERT( ::fclose( f ) == 0 );
+	return out;
+}
 
-	~zip_writer()
-	{
-		if( !mz_zip_writer_finalize_archive( &za ) )
-		{
-			MINIZ_ERR( &za );
-		}
-
-		if( !mz_zip_writer_end( &za ) )
-		{
-			MINIZ_ERR( &za );
-		}
-	}
-
-	bool AddDir( const char* dirPathStr )
-	{
-		if( mz_zip_writer_add_mem( &za, dirPathStr, nullptr, 0, MZ_NO_COMPRESSION ) ) return true;
-
-		MINIZ_ERR( &za );
-		return false;
-	}
-
-	bool WriteBytesToFile( const char* filepathStr, std::span<const u8> bytes )
-	{
-		// NOTE: miniz flushes the writes immediatley 
-		if( mz_zip_writer_add_mem( &za, filepathStr, std::data( bytes ), std::size( bytes ), MZ_NO_COMPRESSION ) )
-		{
-			return true;
-		}
-
-		MINIZ_ERR( &za );
-		return false;
-	}
-};
+constexpr bool CHECK_CORRECTNESS = true;
 
 int main()
 {
@@ -648,20 +569,19 @@ int main()
 	std::vector<raw_material_info> rawMaterials = gltf.ProcessMaterials();
 	std::vector<raw_image_view> imageViews = gltf.ProcessImages();
 
-	compression_job_map_t texBatch = PrepareBcnCompressionBatch( rawMaterials, imageViews );
+	auto[ materialTable, texCmpJobs ] = PrepareBcnCompressionBatch( rawMaterials, imageViews );
 
 	std::vector<std::thread> tasks;
 	std::atomic<u32> taskCounter = { 0 };
 
-	auto jobs = texBatch | std::views::values;
 	auto WorkerLoop = [ & ]()
 	{
 		for( ;; )
 		{
 			u32 currentJobIdx = taskCounter.fetch_add( 1 );
-			if( currentJobIdx >= std::size( texBatch ) ) return;
+			if( currentJobIdx >= std::size( texCmpJobs ) ) return;
 
-			jobs[ currentJobIdx ].Execute();
+			texCmpJobs[ currentJobIdx ].Execute();
 		}
 	};
 
@@ -672,55 +592,84 @@ int main()
 	ankerl::unordered_dense::map<vfs_path, mesh_asset> meshAssetMap;
 	for( const raw_node& n : rawNodes )
 	{
-		if( INVALID_IDX == n.meshIdx ) continue;
+		if( !IsIndexValid( n.meshIdx ) ) continue;
 
 		const raw_mesh& mesh = rawMeshes[ n.meshIdx ];
 
-		HP_ASSERT( sizeof( vfs_path ) > std::size( mesh.name ) );
-
 		vfs_path assetPath = {};
-		std::format_to_n( std::begin( assetPath ), std::size( assetPath ) - 1, "{}", std::data( mesh.name ) );
+		HP_ASSERT( ( std::size( mesh.name ) + std::size( HELLPACK_MESH_DIR ) ) < std::size( assetPath ) );
+
+		std::format_to_n( std::begin( assetPath ), std::size( assetPath ) - 1, 
+			"{}{}.mesh", HELLPACK_MESH_DIR, std::data( mesh.name ) );
 
 		// NOTE: it moves stuff
 		raw_mesh validatedRawMesh = ValidateAndNormalizeRawMesh( mesh );
-		mesh_asset meshAsset = HpMakeMeshAssetFromMeshlets( validatedRawMesh );
+		mesh_asset meshAsset = HpkMakeMeshAssetFromMeshlets( validatedRawMesh );
 		
 		meshAssetMap.emplace( assetPath, std::move( meshAsset ) );
 
 		instances.push_back( {
 			.toWorld = n.toWorld,
-			.meshIdx = ( u16 ) n.meshIdx,
-			.materialIdx = ( u16 ) mesh.materialIdx
+			.meshHash = std::hash<vfs_path>{}( assetPath ),
+			.materialIdx = ( u16 ) mesh.materialIdx // NOTE: these should match 1:1 with ours
 		} );
 	}
 
+	const std::string hpkFilePath = "D:/3d models/Nightclub Futuristic/nightclub_futuristic_pub_ambience_asset.hpk";
+	zip_writer zipArchive = { hpkFilePath.c_str() };
+
+	HP_ASSERT( fs::exists( hpkFilePath ) );
+
+	{
+		hellpack_serializble_buffer buffs[] = { instances, materialTable };
+		std::vector<u8> bytes = HpkMakeBinaryBlob( buffs, hellpack_entry_t::LEVEL );
+		zipArchive.WriteBytesToFile( { "world.lvl" }, bytes );
+	}
+	{
+		for( auto& [ filePath, meshAsset ] : meshAssetMap )
+		{
+			hellpack_serializble_buffer buffs[] = { 
+				meshAsset.vertices, meshAsset.triangles, meshAsset.meshlets, meshAsset.aabb };
+			std::vector<u8> bytes = HpkMakeBinaryBlob( buffs, hellpack_entry_t::MESH );
+			zipArchive.WriteBytesToFile( filePath, bytes );
+		}
+	}
 	WaitThreadPoolDone( tasks );
 
-	const fs::path parentDir = fs::path( gltfFilePath ).parent_path();
-	for( const auto&[ idx, job ] : texBatch )
+	for( const compression_job& cmp : texCmpJobs )
 	{
-		HP_ASSERT( std::size( job.tex ) );
-		WriteFileBinary( ( parentDir / std::data( job.filename ) ).string().c_str(), job.tex );
+		HP_ASSERT( std::size( cmp.tex ) );
+
+		vfs_path texPath = {};
+		HP_ASSERT( ( std::strlen( std::data( cmp.filename ) ) + std::size( HELLPACK_TEX_DIR ) ) < std::size( texPath ) );
+		
+		std::format_to_n( std::begin( texPath ), std::size( texPath ) - 1, 
+			"{}{}", HELLPACK_TEX_DIR, std::data( cmp.filename ) );
+
+		zipArchive.WriteBytesToFile( texPath, cmp.tex );
 	}
 
-	
-	std::vector<material_desc> materials;
-	materials.reserve( std::size( rawMaterials ) );
-	for( const raw_material_info& material : rawMaterials )
+	zipArchive.~zip_writer();
+
+	if constexpr( CHECK_CORRECTNESS )
 	{
-		materials.push_back( {
-			.baseColor = MapGetIfExistsElseDefault( texBatch, material.baseColorIdx ),
-			.metallicRoughness = MapGetIfExistsElseDefault( texBatch, material.metallicRoughnessIdx ),
-			.normal = MapGetIfExistsElseDefault( texBatch, material.normalIdx ),
-			.emissive = MapGetIfExistsElseDefault( texBatch, material.emissiveIdx ),
-			.baseColFactor = material.baseColFactor,
-			.metallicFactor = material.metallicFactor,
-			.roughnessFactor = material.metallicFactor,
-			.alphaCutoff = material.alphaCutoff,
-			.emissiveFactor = material.emissiveFactor,
-			.samplerIdx = material.samplerIdx,
-			.alphaMode = material.alphaMode
-		} );
+		const std::vector<u8> rawBytes = ReadFileBinary( hpkFilePath.c_str() );
+
+		vfs_zip_mem vfsZipMem = { rawBytes };
+
+		const auto& [ key, val ] = *std::cbegin( meshAssetMap );
+
+		std::vector<u8> mesh0Bin( vfsZipMem.GetFileSizeInBytes( key ), 0 );
+		HP_ASSERT( vfsZipMem.ReadFileToBufferNoAlloc( key, std::data( mesh0Bin ), std::size( mesh0Bin ) ) );
+
+		const hellpack_mesh_asset hpkMeshAsset = HpkReadBinaryBlob<hellpack_mesh_asset>( mesh0Bin );
+
+		HP_ASSERT( ByteEqual( MakeByteView( hpkMeshAsset.vertices ), MakeByteView( val.vertices ) ) );
+		HP_ASSERT( ByteEqual( MakeByteView( hpkMeshAsset.triangles ), MakeByteView( val.triangles ) ) );
+		HP_ASSERT( ByteEqual( MakeByteView( hpkMeshAsset.meshlets ), MakeByteView( val.meshlets ) ) );
+
+		HP_ASSERT( hpkMeshAsset.aabbMin == val.aabb[ 0 ] );
+		HP_ASSERT( hpkMeshAsset.aabbMax == val.aabb[ 1 ] );
 	}
 
 	return 0;

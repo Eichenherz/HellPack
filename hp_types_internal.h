@@ -59,16 +59,6 @@ struct raw_image_view
 	image_metadata metadata;
 };
 
-struct packed_mesh
-{
-	std::vector<float3> positions;
-	std::vector<vertex_attrs> attrs;
-	std::vector<u16> indices;
-	std::vector<gpu_bvh2_node> blas;
-	aabb_t<float3> aabb;
-	u16 materialIdx;
-};
-
 struct raw_meshlet
 {
 	std::vector<packed_vtx> vertices;
@@ -108,8 +98,15 @@ struct mesh_asset
 	std::vector<packed_vtx> vertices;
 	std::vector<u8> triangles;
 	std::vector<meshlet> meshlets;
-	float3	aabbMin;
-	float3  aabbMax;
+	std::array<float3, 2> aabb; // NOTE: helps with serialization { min, max }
+};
+
+struct packed_trs;
+
+struct raw_node
+{
+	packed_trs toWorld;
+	u32 meshIdx;
 };
 
 #endif // !__HP_TYPES_INTERNAL_H__
